@@ -1,0 +1,45 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "incremental": false,
+    "jsx": "preserve",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+    "types": ["vite/client"]
+  },
+  "include": [
+    "src/App.vue",
+    "src/main.ts",
+    "src/router/index.ts",
+    "src/template/**/*.ts",
+    "src/template/**/*.vue",
+    "src/components/icons/**/*.ts",
+    "src/components/icons/**/*.vue",
+    "src/components/common/Toast.vue",
+    "src/components/common/DataTable.vue",
+    "src/components/common/types.ts",
+    "src/components/common/Input.vue",
+    "src/components/common/TextArea.vue",
+    "src/components/common/Toggle.vue",
+    "src/components/common/StatCard.vue",
+    "src/components/common/StatusBadge.vue",
+    "src/components/common/Skeleton.vue",
+    "src/components/common/HelpTooltip.vue",
+    "src/vite-env.d.ts"
+  ],
+  "exclude": ["src/**/__tests__/**", "src/**/*.spec.ts", "src/**/*.test.ts"]
+}
