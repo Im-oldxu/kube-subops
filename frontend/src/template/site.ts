@@ -23,8 +23,8 @@ export const systemUpdateEndpoints = {
 } as const
 
 export const defaultSiteSettings: SiteSettings = {
-  siteName: 'Admin Template',
-  siteSubtitle: '通用后台前端基座，可按业务替换页面和接口。',
+  siteName: 'Kube SubOps',
+  siteSubtitle: 'Kubernetes Web 管理平台',
   logoUrl: '/logo.png',
   version: import.meta.env.VITE_APP_VERSION || 'v1.0.0',
   updateCheckUrl: systemUpdateEndpoints.checkUpdates,
@@ -56,6 +56,14 @@ function readStoredSettings(): Partial<SiteSettings> {
 
     if (typeof settings.enableUpdateCheck !== 'boolean') {
       settings.enableUpdateCheck = defaultSiteSettings.enableUpdateCheck
+    }
+
+    if (!settings.siteName || settings.siteName === 'Admin Template') {
+      settings.siteName = defaultSiteSettings.siteName
+    }
+
+    if (!settings.siteSubtitle || settings.siteSubtitle === '通用后台前端基座，可按业务替换页面和接口。') {
+      settings.siteSubtitle = defaultSiteSettings.siteSubtitle
     }
 
     return settings
