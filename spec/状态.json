@@ -1,0 +1,153 @@
+{
+  "project_name": "kube-subops",
+  "stage": "dev-frontend",
+  "mode": "new-product",
+  "version": "1.0.0",
+  "last_updated": "2026-05-27",
+  "project_type": "fullstack",
+  "project_type_history": [
+    {
+      "version": "1.0.0",
+      "date": "2026-05-27",
+      "type": "fullstack",
+      "reason": "新项目需求确认为包含 Web 控制台、后端 Kubernetes API 访问、平台数据持久化、权限与审计能力的全栈应用。"
+    }
+  ],
+  "requires_frontend": true,
+  "requires_backend": true,
+  "requires_ui": true,
+  "frontend_completed": false,
+  "backend_completed": false,
+  "stack": {
+    "frontend": "Vue 3 + TypeScript + Vite + Vue Router + Pinia",
+    "backend": "Go + Gin + client-go",
+    "database": "SQLite + sqlc + goose",
+    "deployment": "Docker Compose"
+  },
+  "tech_stack_history": [
+    {
+      "version": "1.0.0",
+      "date": "2026-05-27",
+      "stack": {
+        "frontend": "Vue 3 + TypeScript + Vite + Vue Router + Pinia",
+        "backend": "Go + Gin + client-go",
+        "database": "SQLite + sqlc + goose",
+        "deployment": "Docker Compose",
+        "auth": "httpOnly Cookie + server-side sessions",
+        "secret_protection": "AES-GCM with environment master key"
+      },
+      "reason": "基于 Kubernetes Web 管理平台 PRD，用户确认 Vue 管理后台、Go 服务、SQLite 快速版、Gin、sqlc + goose、服务端会话 + AES-GCM。"
+    }
+  ],
+  "ui_style_history": [
+    {
+      "version": "1.0.0",
+      "date": "2026-05-27",
+      "template_name": "Sub Admin",
+      "template_id": "sub-admin",
+      "framework": "Vue 3 + TypeScript + Vite + Tailwind CSS 3 + Pinia + Vue Router",
+      "template_dir": "templates/sub-admin",
+      "fact_file": "templates/facts/sub-admin.json",
+      "init_strategy": "copy",
+      "copy_mode": "replace-frontend",
+      "dev_entry": ".",
+      "package_manager": "pnpm@9.15.9",
+      "reason": "基于已确认 Vue 管理后台技术栈，选择本地单项目 Sub Admin 源码基座，用于 Kubernetes 运维控制台的侧栏导航、表格筛选、表单弹窗、设置页、请求层和 mock 基线。"
+    }
+  ],
+  "artifacts": {
+    "change_log": "spec/变更记录.md",
+    "product_spec": "spec/需求文档.md",
+    "solution_architecture": "spec/架构设计.md",
+    "api_design": "spec/API设计.md",
+    "database_design": "spec/数据库设计.md",
+    "ui_spec": "spec/UI原型设计.md",
+    "dev_plan": "spec/开发计划.md",
+    "dev_progress": "spec/开发进度.md",
+    "frontend_check_report": "spec/前端检查报告.md",
+    "backend_check_report": "spec/后端检查报告.md",
+    "ops_status": "spec/运行状态.md"
+  },
+  "quality_gates": {
+    "prd_complete": true,
+    "arch_complete": true,
+    "ui_complete": true,
+    "dev_complete": false,
+    "frontend_check_passed": false,
+    "backend_check_passed": false,
+    "overall_check_passed": false,
+    "check_passed": false,
+    "deploy_required": false,
+    "deploy_package_ready": false,
+    "deploy_check_passed": false
+  },
+  "prd_review": {
+    "planning_status": "committed",
+    "key_open_questions": [],
+    "deferred_questions": [
+      {
+        "question": "Helm Chart、Kubernetes 集群内安装包或 Agent 回连模式是否进入交付范围",
+        "reason": "首版已确认交付 Web 控制台 + Docker Compose，复杂部署形态会扩大部署和网络适配范围。",
+        "follow_up": "后续版本或 /deploy 阶段按发布目标重新评估。"
+      },
+      {
+        "question": "外部 OIDC / LDAP / AD 单点登录是否接入",
+        "reason": "首版已确认采用内置账号体系，外部身份源会增加企业联调和失败兜底范围。",
+        "follow_up": "后续版本作为企业身份集成能力设计。"
+      },
+      {
+        "question": "外部 SIEM、Webhook 或第三方审计系统对接是否进入首版",
+        "reason": "首版已确认采用本地持久审计，外部审计对接会增加第三方契约和运维配置。",
+        "follow_up": "后续版本按审计合规要求扩展。"
+      },
+      {
+        "question": "备份 / 恢复脚本或文档是否作为首版验收项",
+        "reason": "首版只要求平台自身数据服务端持久化，备份恢复能力延期以控制交付边界。",
+        "follow_up": "后续 /deploy 阶段或生产交付版本补充。"
+      }
+    ],
+    "last_interrogation_round": 4,
+    "blocked_from_advancing": false
+  },
+  "baselines": {
+    "product_spec_version": "1.0.0",
+    "solution_architecture_version": "1.0.0",
+    "api_design_version": "1.0.0",
+    "database_design_version": "1.0.0",
+    "ui_spec_version": "1.0.0",
+    "dev_plan_version": "1.0.0",
+    "check_target": "mainline"
+  },
+  "parallel_execution": {
+    "enabled": false,
+    "stage": "idle",
+    "mode": "parallel-capable",
+    "current_feature": "",
+    "analysis_summary": "当前项目已完成 PRD、架构/API/数据库和 UI 交接基线，已选定 Sub Admin（sub-admin）模板；下一步建议先执行 /git-bootstrap 建立工程起点，再进入 /dev-frontend 复制模板并实现前端。",
+    "task_count": 0,
+    "integration_status": "idle",
+    "fallback_to_serial": false,
+    "last_merge_summary": "无待集成并行工作包。",
+    "cleanup_status": "idle",
+    "cleanup_summary": "无待清理临时分支或 worktree。",
+    "tasks": []
+  },
+  "delivery_status": {
+    "需求状态": "已完成（当前版本）",
+    "架构状态": "已完成（当前版本）",
+    "UI状态": "已完成（当前版本）",
+    "前端开发状态": "未开始",
+    "前端检查状态": "未开始",
+    "后端开发状态": "未开始",
+    "后端检查状态": "未开始",
+    "部署状态": "未开始",
+    "部署配置状态": "未开始"
+  },
+  "runtime_baseline": {
+    "frontend_runtime": "Sub Admin template baseline; recommended Node.js 20.x with pnpm@9.15.9; exact runtime to be verified during /dev-frontend",
+    "backend_runtime": "Go; exact version待 backend/go.mod 确认",
+    "database": "SQLite single-instance with WAL and foreign keys",
+    "deployment": "Docker Compose single-instance target",
+    "secrets": "Environment master key for AES-GCM credential encryption"
+  }
+}
