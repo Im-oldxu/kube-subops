@@ -53,7 +53,7 @@ const dialogId = `modal-title-${++dialogIdCounter}`
 const dialogRef = ref<HTMLElement | null>(null)
 let previousActiveElement: HTMLElement | null = null
 
-type DialogWidth = 'narrow' | 'normal' | 'wide' | 'extra-wide' | 'full'
+type DialogWidth = 'narrow' | 'normal' | 'wide' | 'extra-wide' | 'full' | 'workspace'
 
 interface Props {
   show: boolean
@@ -85,13 +85,14 @@ const zIndexStyle = computed(() => {
 const widthClasses = computed(() => {
   // Width guidance: narrow=confirm/short prompts, normal=standard forms,
   // wide=multi-section forms or rich content, extra-wide=analytics/tables,
-  // full=full-screen or very dense layouts.
+  // full=full-screen or very dense layouts; workspace=near full viewport for split editors.
   const widths: Record<DialogWidth, string> = {
     narrow: 'max-w-md',
     normal: 'max-w-lg',
     wide: 'w-full sm:max-w-2xl md:max-w-3xl lg:max-w-4xl',
     'extra-wide': 'w-full sm:max-w-3xl md:max-w-4xl lg:max-w-5xl xl:max-w-6xl',
-    full: 'w-full sm:max-w-4xl md:max-w-5xl lg:max-w-6xl xl:max-w-7xl'
+    full: 'w-full sm:max-w-4xl md:max-w-5xl lg:max-w-6xl xl:max-w-7xl',
+    workspace: 'w-[min(98vw,1720px)] max-w-none'
   }
   return widths[props.width]
 })
@@ -127,7 +128,10 @@ watch(
         firstFocusable?.focus()
       }
     } else {
-      document.body.classList.remove('modal-open')
+      await nextTick()
+      if (!document.querySelector('.modal-overlay')) {
+        document.body.classList.remove('modal-open')
+      }
       // 恢复之前的焦点
       if (previousActiveElement && typeof previousActiveElement.focus === 'function') {
         previousActiveElement.focus()
@@ -144,7 +148,11 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('keydown', handleEscape)
-  // 确保组件卸载时移除滚动锁定
-  document.body.classList.remove('modal-open')
+  // 确保组件卸载时按实际弹窗数量维护滚动锁定
+  void nextTick(() => {
+    if (!document.querySelector('.modal-overlay')) {
+      document.body.classList.remove('modal-open')
+    }
+  })
 })
 </script>

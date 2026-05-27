@@ -40,6 +40,29 @@ function readProcessConfig() {
   )
 }
 
+function defaultMockEnabled(mode: string) {
+  if (mode === 'production') {
+    return 'false'
+  }
+
+  return existsSync(resolve(__dirname, '../backend')) ? 'false' : 'true'
+}
+
+function normalizeBackendUrl(host: string, port: string) {
+  const trimmedHost = (host || '127.0.0.1').trim().replace(/\/$/, '')
+  const trimmedPort = (port || '8080').trim()
+
+  if (/^https?:\/\//i.test(trimmedHost)) {
+    return trimmedHost
+  }
+
+  return `http://${trimmedHost}:${trimmedPort}`
+}
+
+function isTruthy(value: string | undefined) {
+  return ['true', '1', 'yes', 'on'].includes(String(value ?? '').trim().toLowerCase())
+}
+
 function readProjectConfig(mode: string) {
   return {
     APP_ENV: mode === 'production' ? 'production' : 'development',
@@ -49,7 +72,7 @@ function readProjectConfig(mode: string) {
     BACKEND_HOST: '127.0.0.1',
     BACKEND_PORT: '8080',
     API_BASE_URL: '/api',
-    MOCK_ENABLED: 'false',
+    MOCK_ENABLED: defaultMockEnabled(mode),
     ...readEnvFile(resolve(__dirname, '../.env')),
     ...readProcessConfig()
   }
@@ -60,14 +83,32 @@ export default defineConfig(({ mode }) => {
   const backendPort = projectConfig.BACKEND_PORT || '8080'
   const backendHost = projectConfig.BACKEND_HOST || '127.0.0.1'
   const apiBaseUrl = projectConfig.API_BASE_URL || ''
-  const backendUrl = apiBaseUrl || `http://${backendHost}:${backendPort}`
+  const backendUrl = normalizeBackendUrl(backendHost, backendPort)
   const devPort = Number(projectConfig.FRONTEND_PORT || 5173)
+  const mockEnabled = isTruthy(projectConfig.MOCK_ENABLED)
   const injectedEnv = {
     'import.meta.env.VITE_APP_ENV': JSON.stringify(projectConfig.APP_ENV || mode),
     'import.meta.env.VITE_APP_VERSION': JSON.stringify(projectConfig.APP_VERSION || 'v0.1.0'),
     'import.meta.env.VITE_API_BASE_URL': JSON.stringify(apiBaseUrl),
     'import.meta.env.VITE_USE_MOCK': JSON.stringify(projectConfig.MOCK_ENABLED || 'false')
   }
+
+  const proxy = mockEnabled
+    ? undefined
+    : {
+        '/api': {
+          target: backendUrl,
+          changeOrigin: true
+        },
+        '/v1': {
+          target: backendUrl,
+          changeOrigin: true
+        },
+        '/setup': {
+          target: backendUrl,
+          changeOrigin: true
+        }
+      }
 
   return {
     plugins: [
@@ -138,20 +179,7 @@ export default defineConfig(({ mode }) => {
     server: {
       host: '0.0.0.0',
       port: devPort,
-      proxy: {
-        '/api': {
-          target: backendUrl,
-          changeOrigin: true
-        },
-        '/v1': {
-          target: backendUrl,
-          changeOrigin: true
-        },
-        '/setup': {
-          target: backendUrl,
-          changeOrigin: true
-        }
-      }
+      proxy
     }
   }
 })
