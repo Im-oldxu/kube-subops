@@ -788,6 +788,7 @@
   .yaml-highlight-layer,
   .yaml-editor-input {
     @apply min-h-[420px] w-full whitespace-pre-wrap break-words p-3 font-mono leading-6;
+    font-size: 13px;
     tab-size: 2;
   }
 

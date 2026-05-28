@@ -66,7 +66,7 @@ function isTruthy(value: string | undefined) {
 function readProjectConfig(mode: string) {
   return {
     APP_ENV: mode === 'production' ? 'production' : 'development',
-    APP_VERSION: 'v0.1.0',
+    APP_VERSION: 'v0.1.2',
     APP_PACKAGE_MODE: 'source-dev',
     FRONTEND_PORT: '5173',
     BACKEND_HOST: '127.0.0.1',
@@ -88,7 +88,7 @@ export default defineConfig(({ mode }) => {
   const mockEnabled = isTruthy(projectConfig.MOCK_ENABLED)
   const injectedEnv = {
     'import.meta.env.VITE_APP_ENV': JSON.stringify(projectConfig.APP_ENV || mode),
-    'import.meta.env.VITE_APP_VERSION': JSON.stringify(projectConfig.APP_VERSION || 'v0.1.0'),
+    'import.meta.env.VITE_APP_VERSION': JSON.stringify(projectConfig.APP_VERSION || 'v0.1.2'),
     'import.meta.env.VITE_API_BASE_URL': JSON.stringify(apiBaseUrl),
     'import.meta.env.VITE_USE_MOCK': JSON.stringify(projectConfig.MOCK_ENABLED || 'false')
   }

@@ -4,9 +4,11 @@ import type {
   CreateSchema,
   EnvEntry,
   InitContainerEntry,
+  KeyValuePair,
   LifecycleHookEntry,
   MatchExpressionEntry,
   PodAffinityEntry,
+  PodVolumeEntry,
   PortEntry,
   TolerationEntry,
   VolumeMountEntry
@@ -14,8 +16,7 @@ import type {
 import { asRecord, pairsToRecord, readPath, stringRecordToPairs } from './yaml'
 
 const defaultLabels = () => []
-const defaultPort = () => [{ id: 'http', name: 'http', port: 80, targetPort: 8080, protocol: 'TCP' as const }]
-const defaultEnv = () => [{ id: 'env-1', name: 'APP_ENV', value: 'production' }]
+const defaultPort = () => [{ id: 'http', name: 'http', port: 80, targetPort: 8080, protocol: 'TCP' as const, hostPortEnabled: false, hostPort: null, hostIP: '' }]
 const defaultDeploymentLabels = (name = '') => [{ id: 'app', key: 'app', value: name || 'app' }]
 
 let preservedDeploymentPodSpec: Record<string, unknown> = {}
@@ -59,8 +60,17 @@ function withoutVolumeSources(value: Record<string, unknown>) {
   const copy = { ...value }
   delete copy.configMap
   delete copy.secret
+  delete copy.persistentVolumeClaim
   delete copy.emptyDir
   return copy
+}
+
+function supportedVolumeType(volume: Record<string, unknown>): PodVolumeEntry['type'] | null {
+  if (volume.configMap) return 'configMap'
+  if (volume.secret) return 'secret'
+  if (volume.persistentVolumeClaim) return 'persistentVolumeClaim'
+  if (volume.emptyDir) return 'emptyDir'
+  return null
 }
 
 function buildHttpProbe(
@@ -135,14 +145,31 @@ function readLifecycleHooks(container: Record<string, unknown>) {
 function readContainerPorts(container: Record<string, unknown>) {
   return (Array.isArray(container.ports) ? container.ports : []).map((port, index) => {
     const item = asRecord(port)
+    const containerPort = item.containerPort === undefined ? null : Number(item.containerPort)
+    const hostPort = item.hostPort === undefined ? null : Number(item.hostPort)
     return {
       id: `port-${index}`,
       name: String(item.name ?? `port-${index + 1}`),
-      port: Number(item.containerPort ?? 80),
-      targetPort: Number(item.containerPort ?? 80),
-      protocol: String(item.protocol ?? 'TCP') === 'UDP' ? 'UDP' : 'TCP'
+      port: containerPort,
+      targetPort: containerPort,
+      protocol: String(item.protocol ?? 'TCP') === 'UDP' ? 'UDP' : 'TCP',
+      hostPortEnabled: hostPort !== null,
+      hostPort,
+      hostIP: String(item.hostIP ?? '')
     }
   }) as PortEntry[]
+}
+
+function readContainerSecurityContext(container: Record<string, unknown>) {
+  const securityContext = asRecord(container.securityContext)
+  return {
+    containerRunAsUser: securityContext.runAsUser === undefined ? null : Number(securityContext.runAsUser),
+    containerRunAsGroup: securityContext.runAsGroup === undefined ? null : Number(securityContext.runAsGroup),
+    containerRunAsNonRoot: securityContext.runAsNonRoot === undefined ? '' : String(Boolean(securityContext.runAsNonRoot)) as CreateFormState['containerRunAsNonRoot'],
+    privileged: securityContext.privileged === undefined ? '' : String(Boolean(securityContext.privileged)) as CreateFormState['privileged'],
+    allowPrivilegeEscalation: securityContext.allowPrivilegeEscalation === undefined ? '' : String(Boolean(securityContext.allowPrivilegeEscalation)) as CreateFormState['allowPrivilegeEscalation'],
+    readOnlyRootFilesystem: securityContext.readOnlyRootFilesystem === undefined ? '' : String(Boolean(securityContext.readOnlyRootFilesystem)) as CreateFormState['readOnlyRootFilesystem']
+  }
 }
 
 function readContainerEnv(container: Record<string, unknown>, prefix = 'env') {
@@ -174,6 +201,23 @@ function readVolumeMountEntries(
       readOnly: Boolean(mountItem.readOnly ?? type !== 'emptyDir')
     }
   }) as VolumeMountEntry[]
+}
+
+function readPodVolumeEntries(volumes: Record<string, unknown>[], prefix: string) {
+  return volumes.flatMap((volume, index) => {
+    const type = supportedVolumeType(volume)
+    if (!type) return []
+    const configMap = asRecord(volume.configMap)
+    const secret = asRecord(volume.secret)
+    const pvc = asRecord(volume.persistentVolumeClaim)
+    const name = String(volume.name ?? '')
+    return [{
+      id: `${prefix}-${index}`,
+      type,
+      name,
+      sourceName: String(configMap.name ?? secret.secretName ?? pvc.claimName ?? name)
+    }]
+  }) as PodVolumeEntry[]
 }
 
 function appContainerFromObject(container: Record<string, unknown>, index: number, volumes: Record<string, unknown>[]): AppContainerEntry {
@@ -220,7 +264,8 @@ function appContainerFromObject(container: Record<string, unknown>, index: numbe
     startupFailureThreshold: startup.failureThreshold,
     startupSuccessThreshold: startup.successThreshold,
     volumeMounts: readVolumeMountEntries(volumeMounts, volumes, `volume-${index}`),
-    lifecycleHooks: readLifecycleHooks(container)
+    lifecycleHooks: readLifecycleHooks(container),
+    ...readContainerSecurityContext(container)
   }
 }
 
@@ -281,6 +326,24 @@ function buildTolerations(tolerations: TolerationEntry[]) {
     }))
 }
 
+function buildImagePullSecrets(value: string) {
+  return csvToArray(value).map((name) => ({ name }))
+}
+
+function buildDnsConfig(form: CreateFormState) {
+  const options = form.dnsOptions
+    .filter((item) => item.key.trim())
+    .map((item) => compactObject({
+      name: item.key.trim(),
+      value: item.value.trim() || undefined
+    }))
+  return nonEmptyObject(compactObject({
+    nameservers: compactArray(csvToArray(form.dnsNameservers)),
+    searches: compactArray(csvToArray(form.dnsSearches)),
+    options: compactArray(options)
+  }))
+}
+
 function buildLifecycle(hooks: LifecycleHookEntry[]) {
   const lifecycle = hooks.reduce<Record<string, unknown>>((result, hook) => {
     if (hook.handlerType === 'exec') {
@@ -337,9 +400,15 @@ function buildVolumeMounts(mounts: VolumeMountEntry[], preservedMap: Record<stri
     })
 }
 
-function buildVolumes(mounts: VolumeMountEntry[]) {
-  return mounts
-    .filter((item) => item.name.trim())
+function buildVolumes(volumes: Array<PodVolumeEntry | VolumeMountEntry>) {
+  const seen = new Set<string>()
+  return volumes
+    .filter((item) => {
+      const name = item.name.trim()
+      if (!name || seen.has(name)) return false
+      seen.add(name)
+      return true
+    })
     .map((item) => {
       const name = item.name.trim()
       const sourceName = item.sourceName.trim() || name
@@ -359,13 +428,14 @@ function buildVolumes(mounts: VolumeMountEntry[]) {
         }
       }
       if (item.type === 'persistentVolumeClaim') {
+        const volumeReadOnly = 'readOnly' in item ? item.readOnly : false
         return {
           ...withoutVolumeSources(preservedVolume),
           name,
           persistentVolumeClaim: {
             ...asRecord(preservedVolume.persistentVolumeClaim),
             claimName: sourceName,
-            readOnly: item.readOnly || undefined
+            readOnly: volumeReadOnly || undefined
           }
         }
       }
@@ -383,6 +453,7 @@ function buildInitContainers(form: CreateFormState) {
     .map((container) => {
       const name = container.name.trim()
       const volumeMounts = buildVolumeMounts(container.volumeMounts, preservedDeploymentInitVolumeMountMap)
+      const securityContext = buildContainerSecurityContext(container)
       return compactObject({
         ...preservedDeploymentInitContainerMap[name],
         name,
@@ -394,7 +465,8 @@ function buildInitContainers(form: CreateFormState) {
           .filter((item) => item.name.trim())
           .map((item) => ({ name: item.name.trim(), value: item.value }))),
         resources: buildContainerResources(container.cpuRequest, container.memoryRequest, container.cpuLimit, container.memoryLimit),
-        volumeMounts: compactArray(volumeMounts)
+        volumeMounts: compactArray(volumeMounts),
+        securityContext
       })
     })
 }
@@ -433,7 +505,13 @@ function formPrimaryAppContainer(form: CreateFormState): AppContainerEntry {
     startupFailureThreshold: form.startupFailureThreshold,
     startupSuccessThreshold: form.startupSuccessThreshold,
     volumeMounts: form.volumeMounts,
-    lifecycleHooks: form.lifecycleHooks
+    lifecycleHooks: form.lifecycleHooks,
+    containerRunAsUser: form.containerRunAsUser,
+    containerRunAsGroup: form.containerRunAsGroup,
+    containerRunAsNonRoot: form.containerRunAsNonRoot,
+    privileged: form.privileged,
+    allowPrivilegeEscalation: form.allowPrivilegeEscalation,
+    readOnlyRootFilesystem: form.readOnlyRootFilesystem
   }
 }
 
@@ -452,14 +530,14 @@ function buildPodSecurityContext(form: CreateFormState) {
   }))
 }
 
-function buildContainerSecurityContext(form: CreateFormState) {
+function buildContainerSecurityContext(source: Pick<AppContainerEntry | InitContainerEntry | CreateFormState, 'containerRunAsUser' | 'containerRunAsGroup' | 'containerRunAsNonRoot' | 'privileged' | 'allowPrivilegeEscalation' | 'readOnlyRootFilesystem'>) {
   return nonEmptyObject(compactObject({
-    runAsUser: form.containerRunAsUser ?? undefined,
-    runAsGroup: form.containerRunAsGroup ?? undefined,
-    runAsNonRoot: optionalBoolean(form.containerRunAsNonRoot),
-    privileged: optionalBoolean(form.privileged),
-    allowPrivilegeEscalation: optionalBoolean(form.allowPrivilegeEscalation),
-    readOnlyRootFilesystem: optionalBoolean(form.readOnlyRootFilesystem)
+    runAsUser: source.containerRunAsUser ?? undefined,
+    runAsGroup: source.containerRunAsGroup ?? undefined,
+    runAsNonRoot: optionalBoolean(source.containerRunAsNonRoot),
+    privileged: optionalBoolean(source.privileged),
+    allowPrivilegeEscalation: optionalBoolean(source.allowPrivilegeEscalation),
+    readOnlyRootFilesystem: optionalBoolean(source.readOnlyRootFilesystem)
   }))
 }
 
@@ -509,17 +587,26 @@ function buildAppContainers(form: CreateFormState) {
         container.startupSuccessThreshold
       )
       const volumeMounts = buildVolumeMounts(container.volumeMounts, preservedDeploymentAppVolumeMountMap)
+      const securityContext = buildContainerSecurityContext(container)
       return compactObject({
         ...preservedDeploymentContainerMap[name],
         ...(name === form.containerName ? preservedDeploymentContainer : {}),
         name,
         image: container.image.trim(),
         imagePullPolicy: container.imagePullPolicy,
-        ports: compactArray(container.ports.map((port) => ({
-          name: port.name || undefined,
-          containerPort: Number(port.targetPort) || Number(port.port) || 80,
-          protocol: port.protocol
-        }))),
+        ports: compactArray(container.ports
+          .map((port) => {
+            const containerPort = Number(port.targetPort) || Number(port.port) || 0
+            if (!containerPort) return undefined
+            return compactObject({
+              name: port.name || undefined,
+              containerPort,
+              protocol: port.protocol,
+              hostPort: port.hostPortEnabled && port.hostPort ? Number(port.hostPort) : undefined,
+              hostIP: port.hostPortEnabled && port.hostIP.trim() ? port.hostIP.trim() : undefined
+            })
+          })
+          .filter((port): port is Record<string, unknown> => Boolean(port))),
         env: compactArray(container.env
           .filter((item) => item.name.trim())
           .map((item) => ({ name: item.name.trim(), value: item.value }))),
@@ -528,7 +615,8 @@ function buildAppContainers(form: CreateFormState) {
         livenessProbe,
         startupProbe,
         lifecycle: buildLifecycle(container.lifecycleHooks),
-        volumeMounts: compactArray(volumeMounts)
+        volumeMounts: compactArray(volumeMounts),
+        securityContext
       })
     })
 }
@@ -545,10 +633,15 @@ function deploymentObject(form: CreateFormState) {
   const affinity = buildAffinity(form)
   const tolerations = buildTolerations(form.tolerations)
   const appContainers = buildAppContainers(form)
-  const containerSecurityContext = buildContainerSecurityContext(form)
-  const configuredVolumes = buildVolumes([
+  const imagePullSecrets = buildImagePullSecrets(form.imagePullSecrets)
+  const dnsConfig = buildDnsConfig(form)
+  const mountedVolumes = [
     ...appContainersForForm(form).flatMap((container) => container.volumeMounts),
     ...form.initContainers.flatMap((container) => container.volumeMounts)
+  ]
+  const configuredVolumes = buildVolumes([
+    ...form.podVolumes,
+    ...mountedVolumes
   ])
   const volumes = [...preservedDeploymentVolumes, ...configuredVolumes]
   const initContainers = buildInitContainers(form)
@@ -587,17 +680,17 @@ function deploymentObject(form: CreateFormState) {
           ...preservedDeploymentPodSpec,
           serviceAccountName: form.serviceAccountName || undefined,
           automountServiceAccountToken: form.automountServiceAccountToken === '' ? undefined : form.automountServiceAccountToken === 'true',
+          imagePullSecrets: imagePullSecrets.length ? imagePullSecrets : undefined,
           securityContext: buildPodSecurityContext(form),
+          hostNetwork: optionalBoolean(form.hostNetwork),
+          dnsPolicy: form.dnsPolicy || undefined,
+          dnsConfig,
           nodeSelector: Object.keys(nodeSelector).length ? nodeSelector : undefined,
           affinity,
           tolerations: tolerations.length ? tolerations : undefined,
           volumes: volumes.length ? volumes : undefined,
           initContainers: initContainers.length ? initContainers : undefined,
-          containers: (appContainers.length ? appContainers : [formPrimaryAppContainer(form)])
-            .map((container) => compactObject({
-              ...container,
-              securityContext: containerSecurityContext
-            }))
+          containers: appContainers
         }
       }
     }
@@ -700,18 +793,18 @@ export const createSchemas: Record<string, CreateSchema> = {
       containerName: 'app',
       image: 'nginx:1.27',
       imagePullPolicy: 'IfNotPresent',
-      cpuRequest: '100m',
-      memoryRequest: '128Mi',
-      cpuLimit: '500m',
-      memoryLimit: '512Mi',
-      readinessPath: '/healthz',
+      cpuRequest: '',
+      memoryRequest: '',
+      cpuLimit: '',
+      memoryLimit: '',
+      readinessPath: '',
       readinessPort: 8080,
       readinessInitialDelaySeconds: 10,
       readinessPeriodSeconds: 10,
       readinessTimeoutSeconds: 1,
       readinessFailureThreshold: 3,
       readinessSuccessThreshold: 1,
-      livenessPath: '/healthz',
+      livenessPath: '',
       livenessPort: 8080,
       livenessInitialDelaySeconds: 30,
       livenessPeriodSeconds: 10,
@@ -725,8 +818,9 @@ export const createSchemas: Record<string, CreateSchema> = {
       startupTimeoutSeconds: 1,
       startupFailureThreshold: 30,
       startupSuccessThreshold: 1,
-      ports: defaultPort(),
-      env: defaultEnv(),
+      ports: [],
+      env: [],
+      imagePullSecrets: '',
       runAsUser: null,
       runAsGroup: null,
       fsGroup: null,
@@ -744,6 +838,12 @@ export const createSchemas: Record<string, CreateSchema> = {
       podAffinity: [],
       podAntiAffinity: [],
       tolerations: [],
+      hostNetwork: '',
+      dnsPolicy: '',
+      dnsNameservers: '',
+      dnsSearches: '',
+      dnsOptions: [],
+      podVolumes: [],
       volumeMounts: [],
       appContainers: [],
       initContainers: [],
@@ -760,6 +860,7 @@ export const createSchemas: Record<string, CreateSchema> = {
       { title: '基本信息', fields: commonFields },
       {
         title: 'Pod 模板',
+        description: '普通容器、Init 容器和容器级配置入口。',
         fields: [
           { key: 'replicas', label: '副本数', type: 'number', required: true, min: 0 },
           { key: 'containerName', label: '容器名称', type: 'text', required: true, placeholder: 'app' },
@@ -955,6 +1056,7 @@ export function createDefaultForm(resourceType: string, kind: string, namespace:
     startupSuccessThreshold: 1,
     serviceAccountName: '',
     automountServiceAccountToken: '',
+    imagePullSecrets: '',
     runAsUser: null,
     runAsGroup: null,
     fsGroup: null,
@@ -972,6 +1074,12 @@ export function createDefaultForm(resourceType: string, kind: string, namespace:
     podAffinity: [],
     podAntiAffinity: [],
     tolerations: [],
+    hostNetwork: '',
+    dnsPolicy: '',
+    dnsNameservers: '',
+    dnsSearches: '',
+    dnsOptions: [],
+    podVolumes: [],
     volumeMounts: [],
     appContainers: [],
     initContainers: [],
@@ -1018,6 +1126,7 @@ export function applyObjectToForm(form: CreateFormState, object: Record<string, 
     const livenessHttpGet = asRecord(preservedDeploymentLivenessProbe.httpGet)
     const startupHttpGet = asRecord(preservedDeploymentStartupProbe.httpGet)
     const volumes = Array.isArray(podSpec.volumes) ? podSpec.volumes.map((item) => asRecord(item)) : []
+    form.podVolumes = readPodVolumeEntries(volumes, 'pod-volume')
     preservedDeploymentVolumeMap = Object.fromEntries(volumes.map((item) => [String(item.name ?? ''), item]).filter(([name]) => name))
     const volumeMounts = Array.isArray(container.volumeMounts) ? container.volumeMounts.map((item) => asRecord(item)) : []
     preservedDeploymentAppVolumeMountMap = Object.fromEntries(containers
@@ -1036,7 +1145,7 @@ export function applyObjectToForm(form: CreateFormState, object: Record<string, 
       }] as const
     }).filter(([name]) => name))
     const initContainers = Array.isArray(podSpec.initContainers) ? podSpec.initContainers.map((item) => asRecord(item)) : []
-    preservedDeploymentInitContainerMap = Object.fromEntries(initContainers.map((item) => [String(item.name ?? ''), item]).filter(([name]) => name))
+    preservedDeploymentInitContainerMap = Object.fromEntries(initContainers.map((item) => [String(item.name ?? ''), { ...item }]).filter(([name]) => name))
     preservedDeploymentInitVolumeMountMap = Object.fromEntries(initContainers
       .flatMap((initContainer) => {
         const mounts = Array.isArray(initContainer.volumeMounts) ? initContainer.volumeMounts.map((item) => asRecord(item)) : []
@@ -1048,7 +1157,11 @@ export function applyObjectToForm(form: CreateFormState, object: Record<string, 
     delete preservedDeploymentPodSpec.initContainers
     delete preservedDeploymentPodSpec.serviceAccountName
     delete preservedDeploymentPodSpec.automountServiceAccountToken
+    delete preservedDeploymentPodSpec.imagePullSecrets
     delete preservedDeploymentPodSpec.securityContext
+    delete preservedDeploymentPodSpec.hostNetwork
+    delete preservedDeploymentPodSpec.dnsPolicy
+    delete preservedDeploymentPodSpec.dnsConfig
     delete preservedDeploymentPodSpec.nodeSelector
     delete preservedDeploymentPodSpec.affinity
     delete preservedDeploymentPodSpec.tolerations
@@ -1061,9 +1174,19 @@ export function applyObjectToForm(form: CreateFormState, object: Record<string, 
     }
     stripGeneratedContainerFields(preservedDeploymentContainer)
     Object.values(preservedDeploymentContainerMap).forEach(stripGeneratedContainerFields)
+    const stripGeneratedInitContainerFields = (target: Record<string, unknown>) => {
+      for (const key of ['name', 'image', 'imagePullPolicy', 'env', 'resources', 'volumeMounts', 'securityContext', 'lifecycle', 'readinessProbe', 'livenessProbe', 'startupProbe']) {
+        delete target[key]
+      }
+    }
+    Object.values(preservedDeploymentInitContainerMap).forEach(stripGeneratedInitContainerFields)
     form.containerName = String(container.name ?? form.containerName)
     form.image = String(container.image ?? form.image)
     form.imagePullPolicy = String(container.imagePullPolicy ?? form.imagePullPolicy) as CreateFormState['imagePullPolicy']
+    form.imagePullSecrets = (Array.isArray(podSpec.imagePullSecrets) ? podSpec.imagePullSecrets : [])
+      .map((item) => String(asRecord(item).name ?? ''))
+      .filter(Boolean)
+      .join(', ')
     form.cpuRequest = String(requests.cpu ?? '')
     form.memoryRequest = String(requests.memory ?? '')
     form.cpuLimit = String(limits.cpu ?? '')
@@ -1159,6 +1282,15 @@ export function applyObjectToForm(form: CreateFormState, object: Record<string, 
         tolerationSeconds: item.tolerationSeconds === undefined ? null : Number(item.tolerationSeconds)
       }
     }) as TolerationEntry[]
+    const dnsConfig = asRecord(podSpec.dnsConfig)
+    form.hostNetwork = podSpec.hostNetwork === undefined ? '' : String(Boolean(podSpec.hostNetwork)) as CreateFormState['hostNetwork']
+    form.dnsPolicy = String(podSpec.dnsPolicy ?? '') as CreateFormState['dnsPolicy']
+    form.dnsNameservers = valuesToCsv(dnsConfig.nameservers)
+    form.dnsSearches = valuesToCsv(dnsConfig.searches)
+    form.dnsOptions = (Array.isArray(dnsConfig.options) ? dnsConfig.options : []).map((option, index) => {
+      const item = asRecord(option)
+      return { id: `dns-option-${index}`, key: String(item.name ?? ''), value: String(item.value ?? '') }
+    }) as KeyValuePair[]
     form.lifecycleHooks = readLifecycleHooks(container)
     form.volumeMounts = readVolumeMountEntries(volumeMounts, volumes, 'volume')
     form.appContainers = containers.map((item, index) => appContainerFromObject(item, index, volumes))
@@ -1198,14 +1330,11 @@ export function applyObjectToForm(form: CreateFormState, object: Record<string, 
             subPath: String(mountItem.subPath ?? ''),
             readOnly: Boolean(mountItem.readOnly ?? type !== 'emptyDir')
           }
-        }) as VolumeMountEntry[]
+        }) as VolumeMountEntry[],
+        ...readContainerSecurityContext(initContainer)
       }
     }) as InitContainerEntry[]
-    const formVolumeNames = new Set([
-      ...form.appContainers.flatMap((item) => item.volumeMounts.map((mount) => mount.name).filter(Boolean)),
-      ...form.initContainers.flatMap((item) => item.volumeMounts.map((mount) => mount.name).filter(Boolean))
-    ])
-    preservedDeploymentVolumes = volumes.filter((item) => !formVolumeNames.has(String(item.name ?? '')))
+    preservedDeploymentVolumes = volumes.filter((item) => !supportedVolumeType(item))
     form.ports = readContainerPorts(container)
     form.env = readContainerEnv(container)
   }
@@ -1220,7 +1349,10 @@ export function applyObjectToForm(form: CreateFormState, object: Record<string, 
         name: String(item.name ?? `port-${index + 1}`),
         port: Number(item.port ?? 80),
         targetPort: Number(item.targetPort ?? item.port ?? 80),
-        protocol: String(item.protocol ?? 'TCP') === 'UDP' ? 'UDP' : 'TCP'
+        protocol: String(item.protocol ?? 'TCP') === 'UDP' ? 'UDP' : 'TCP',
+        hostPortEnabled: false,
+        hostPort: null,
+        hostIP: ''
       }
     }) as PortEntry[]
   }
@@ -1250,13 +1382,27 @@ export function validateCreateForm(form: CreateFormState, resourceType: string) 
   if (resourceType === 'deployments') {
     const appContainers = appContainersForForm(form)
     if (!appContainers.length) errors.push('至少需要一个普通容器。')
+    const volumeNames = new Set<string>()
+    form.podVolumes.forEach((volume, index) => {
+      const name = volume.name.trim()
+      if (!name) errors.push(`Pod 存储卷 ${index + 1} 名称不能为空。`)
+      if (name && volumeNames.has(name)) errors.push(`Pod 存储卷 ${name} 重复。`)
+      if (name) volumeNames.add(name)
+      if (volume.type !== 'emptyDir' && !volume.sourceName.trim()) errors.push(`Pod 存储卷 ${name || index + 1} 需要选择来源资源。`)
+    })
     appContainers.forEach((container, index) => {
       if (!container.name.trim()) errors.push(`普通容器 ${index + 1} 名称不能为空。`)
       if (!container.image.trim()) errors.push(`普通容器 ${index + 1} 镜像不能为空。`)
+      container.volumeMounts.forEach((mount) => {
+        if (mount.name.trim() && !volumeNames.has(mount.name.trim())) errors.push(`普通容器 ${container.name || index + 1} 挂载了未定义的 Pod 存储卷 ${mount.name}。`)
+      })
     })
     form.initContainers.forEach((container, index) => {
       if (!container.name.trim()) errors.push(`Init 容器 ${index + 1} 名称不能为空。`)
       if (!container.image.trim()) errors.push(`Init 容器 ${index + 1} 镜像不能为空。`)
+      container.volumeMounts.forEach((mount) => {
+        if (mount.name.trim() && !volumeNames.has(mount.name.trim())) errors.push(`Init 容器 ${container.name || index + 1} 挂载了未定义的 Pod 存储卷 ${mount.name}。`)
+      })
     })
   }
 

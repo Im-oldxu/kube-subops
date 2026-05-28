@@ -9,9 +9,12 @@ export interface KeyValuePair {
 export interface PortEntry {
   id: string
   name: string
-  port: number
-  targetPort: number
+  port: number | null
+  targetPort: number | null
   protocol: 'TCP' | 'UDP'
+  hostPortEnabled: boolean
+  hostPort: number | null
+  hostIP: string
 }
 
 export interface EnvEntry {
@@ -20,9 +23,18 @@ export interface EnvEntry {
   value: string
 }
 
+export type VolumeSourceType = 'configMap' | 'secret' | 'persistentVolumeClaim' | 'emptyDir'
+
+export interface PodVolumeEntry {
+  id: string
+  type: VolumeSourceType
+  name: string
+  sourceName: string
+}
+
 export interface VolumeMountEntry {
   id: string
-  type: 'configMap' | 'secret' | 'persistentVolumeClaim' | 'emptyDir'
+  type: VolumeSourceType
   name: string
   sourceName: string
   mountPath: string
@@ -43,6 +55,12 @@ export interface InitContainerEntry {
   memoryLimit: string
   env: EnvEntry[]
   volumeMounts: VolumeMountEntry[]
+  containerRunAsUser: number | null
+  containerRunAsGroup: number | null
+  containerRunAsNonRoot: '' | 'true' | 'false'
+  privileged: '' | 'true' | 'false'
+  allowPrivilegeEscalation: '' | 'true' | 'false'
+  readOnlyRootFilesystem: '' | 'true' | 'false'
 }
 
 export interface AppContainerEntry {
@@ -79,6 +97,12 @@ export interface AppContainerEntry {
   startupSuccessThreshold: number
   volumeMounts: VolumeMountEntry[]
   lifecycleHooks: LifecycleHookEntry[]
+  containerRunAsUser: number | null
+  containerRunAsGroup: number | null
+  containerRunAsNonRoot: '' | 'true' | 'false'
+  privileged: '' | 'true' | 'false'
+  allowPrivilegeEscalation: '' | 'true' | 'false'
+  readOnlyRootFilesystem: '' | 'true' | 'false'
 }
 
 export interface MatchExpressionEntry {
@@ -150,6 +174,7 @@ export interface CreateFormState {
   startupSuccessThreshold: number
   serviceAccountName: string
   automountServiceAccountToken: '' | 'true' | 'false'
+  imagePullSecrets: string
   runAsUser: number | null
   runAsGroup: number | null
   fsGroup: number | null
@@ -167,6 +192,12 @@ export interface CreateFormState {
   podAffinity: PodAffinityEntry[]
   podAntiAffinity: PodAffinityEntry[]
   tolerations: TolerationEntry[]
+  hostNetwork: '' | 'true' | 'false'
+  dnsPolicy: '' | 'ClusterFirst' | 'Default' | 'ClusterFirstWithHostNet' | 'None'
+  dnsNameservers: string
+  dnsSearches: string
+  dnsOptions: KeyValuePair[]
+  podVolumes: PodVolumeEntry[]
   volumeMounts: VolumeMountEntry[]
   appContainers: AppContainerEntry[]
   initContainers: InitContainerEntry[]

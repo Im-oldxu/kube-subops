@@ -12,7 +12,7 @@ import {
   createSchemas,
   validateCreateForm
 } from '@/template/kube-create/schemas'
-import type { AppContainerEntry, CreateField, CreateFieldOption, CreateFormState, InitContainerEntry, KeyValuePair, VolumeMountEntry } from '@/template/kube-create/types'
+import type { AppContainerEntry, CreateField, CreateFieldOption, CreateFormState, InitContainerEntry, KeyValuePair, PodVolumeEntry, PortEntry, VolumeMountEntry } from '@/template/kube-create/types'
 import { parseKubeYaml, stringifyKubeObject } from '@/template/kube-create/yaml'
 import * as templateApi from '@/template/api'
 import * as templateData from '@/template/data'
@@ -24,19 +24,27 @@ type EditMode = 'create' | 'edit'
 type CreateMode = 'form' | 'yaml'
 type ResourcePanel = 'cpu' | 'memory'
 type ProbePanel = 'readiness' | 'liveness' | 'startup'
-type MountPanel = VolumeMountEntry['type']
+type MountPanel = PodVolumeEntry['type']
 type DeploymentPanel = 'basic' | 'metadata'
 type PodTemplatePanel = 'app' | 'init'
-type AppContainerPanel = 'basic' | 'ports' | 'env' | 'resources' | 'probes' | 'mounts' | 'lifecycle'
-type InitContainerPanel = 'basic' | 'command' | 'env' | 'resources' | 'mounts'
-type PodSecurityPanel = 'identity' | 'pod' | 'container'
-type SchedulePanel = 'node' | 'pod' | 'tolerations'
+type AppContainerPanel = 'basic' | 'env' | 'resources' | 'security' | 'probes' | 'mounts' | 'lifecycle'
+type InitContainerPanel = 'basic' | 'command' | 'env' | 'resources' | 'security' | 'mounts'
+type PodSecurityPanel = 'identity' | 'pod'
+type PodSchedulePanel = 'affinity' | 'antiAffinity'
+type NodeSchedulePanel = 'selector' | 'affinity' | 'tolerations'
 type LifecyclePanel = 'postStart' | 'preStop'
 type StrategyPanel = 'strategy' | 'history'
 type YamlTemplateId = 'web' | 'api' | 'worker' | 'db'
 type RelatedCreateType = 'configmaps' | 'secrets' | 'persistent-volume-claims'
+type RelatedTargetKind = 'pod-volume' | 'app-mount' | 'image-pull-secret'
 type CreateDialogSize = 'regular' | 'wide'
 type YamlValidationStatus = 'ok' | 'warning' | 'error' | 'info'
+type ConfigSourceOption = {
+  label: string
+  value: string
+  secretType?: string
+  usage?: 'volume' | 'imagePullSecret' | 'both'
+}
 type ConfirmAction =
   | 'delete'
   | 'apply-yaml'
@@ -230,12 +238,13 @@ const activeResourcePanel = ref<ResourcePanel>('cpu')
 const activeProbePanel = ref<ProbePanel>('readiness')
 const activeMountPanel = ref<MountPanel>('configMap')
 const activePodSecurityPanel = ref<PodSecurityPanel>('identity')
-const activeSchedulePanel = ref<SchedulePanel>('node')
+const activePodSchedulePanel = ref<PodSchedulePanel>('affinity')
+const activeNodeSchedulePanel = ref<NodeSchedulePanel>('selector')
 const activeLifecyclePanel = ref<LifecyclePanel>('postStart')
 const activeStrategyPanel = ref<StrategyPanel>('strategy')
 const collapsedSections = reactive<Record<string, boolean>>({})
+const createDialogSize = ref<CreateDialogSize>('regular')
 const yamlFontSize = ref(13)
-const createDialogSize = ref<CreateDialogSize>('wide')
 const activeYamlTemplate = ref<YamlTemplateId>('web')
 const yamlTextareaRef = ref<HTMLTextAreaElement | null>(null)
 const createForm = reactive<CreateFormState>(createDefaultForm('pods', 'Pod', 'default'))
@@ -255,6 +264,9 @@ const actionForm = reactive<WorkloadActionForm>({
 const relatedDialogOpen = ref(false)
 const relatedMountType = ref<Exclude<MountPanel, 'emptyDir'>>('configMap')
 const relatedMountTargetId = ref<string | null>(null)
+const relatedPodVolumeTargetId = ref<string | null>(null)
+const relatedTargetKind = ref<RelatedTargetKind>('app-mount')
+const imagePullSecretDropdownOpen = ref(false)
 const relatedCreateMode = ref<CreateMode>('form')
 const relatedForm = reactive<CreateFormState>(createDefaultForm('configmaps', 'ConfigMap', 'default'))
 const relatedFormState = reactive({
@@ -287,6 +299,11 @@ const relatedResourceType = computed<RelatedCreateType>(() => relatedMountType.v
 const relatedDefinition = computed(() => resourceDefinitions[relatedResourceType.value])
 const relatedCreateSchema = computed(() => createSchemas[relatedDefinition.value.type])
 const hasRelatedCreateSchema = computed(() => Boolean(relatedCreateSchema.value))
+const relatedFillTargetText = computed(() => {
+  if (relatedTargetKind.value === 'pod-volume') return 'Pod 存储卷'
+  if (relatedTargetKind.value === 'image-pull-secret') return '镜像拉取密钥'
+  return '当前容器挂载配置'
+})
 const activeAppContainer = computed(() => createForm.appContainers.find((item) => item.id === activeAppContainerId.value) ?? createForm.appContainers[0])
 const activeInitContainer = computed(() => createForm.initContainers.find((item) => item.id === activeInitContainerId.value) ?? createForm.initContainers[0])
 const createDialogWidth = computed(() => createDialogSize.value === 'wide' ? 'workspace' : 'full')
@@ -298,6 +315,22 @@ const createDialogSplitClass = computed(() => (
 const yamlValidationItems = computed<YamlValidationItem[]>(() => validateYamlContent(formState.yaml, createDefinition.value, formState.namespace || createForm.namespace))
 const highlightedYaml = computed(() => highlightYaml(formState.yaml))
 const clusterOptions = computed(() => clusters.value.map((cluster) => ({ label: cluster.name, value: cluster.id })))
+const imagePullSecretOptions = computed(() => {
+  const options = configSourceOptions.secret.filter((option) => {
+    const secretType = option.secretType ?? ''
+    return option.usage === 'imagePullSecret' || option.usage === 'both' || secretType === 'kubernetes.io/dockerconfigjson' || secretType === 'kubernetes.io/dockercfg'
+  })
+  imagePullSecretNames().forEach((name) => {
+    if (!options.some((option) => option.value === name)) options.push({ label: `${name}（YAML 原始值）`, value: name })
+  })
+  return options
+})
+const imagePullSecretTriggerText = computed(() => {
+  const names = imagePullSecretNames()
+  if (!names.length) return '请选择镜像仓库认证 Secret'
+  if (names.length === 1) return names[0]
+  return `已选择 ${names.length} 个：${names.join(', ')}`
+})
 const computedNamespaceOptions = computed(() => {
   const options = currentDefinition.value.namespaced ? namespaceOptions : ['cluster-scope']
   return options.map((namespace) => ({ label: namespace, value: namespace }))
@@ -332,17 +365,22 @@ const detailTabs = [
   { id: 'yaml', label: 'YAML' }
 ] as const
 const podTemplatePanels: Array<{ id: PodTemplatePanel; label: string; help: string }> = [
-  { id: 'app', label: '普通容器', help: 'Deployment Pod 中长期运行的业务容器，可配置多个容器，并分别维护基础、端口、环境变量、资源、探针、挂载和生命周期。' },
+  { id: 'app', label: '普通容器', help: 'Deployment Pod 中长期运行的业务容器，可配置多个容器，并分别维护基础、环境变量、资源、安全、探针、挂载和生命周期。' },
   { id: 'init', label: 'Init 容器', help: 'Pod 启动前顺序执行的初始化容器，支持命令、环境变量、资源和挂载；普通 init 容器不配置探针和生命周期钩子。' }
 ]
 const appContainerPanels: Array<{ id: AppContainerPanel; label: string; help: string }> = [
-  { id: 'basic', label: '基础', help: '配置普通容器名称、镜像和拉取策略。' },
-  { id: 'ports', label: '端口', help: '写入当前普通容器 ports。' },
+  { id: 'basic', label: '基础', help: '配置普通容器名称、镜像、拉取策略和 ports。' },
   { id: 'env', label: '环境变量', help: '写入当前普通容器 env。' },
   { id: 'resources', label: '资源', help: '按 CPU 与内存配置当前普通容器 requests / limits。' },
+  { id: 'security', label: '安全', help: '配置当前普通容器 securityContext，可覆盖 Pod 级默认安全上下文。' },
   { id: 'probes', label: '健康检查', help: '配置当前普通容器 readiness、liveness 和 startup probe。' },
-  { id: 'mounts', label: '挂载', help: '配置当前普通容器 volumeMounts，并同步生成 Pod volumes。' },
+  { id: 'mounts', label: '挂载', help: '从 Pod 存储卷中选择 volume，并配置当前普通容器 volumeMounts。' },
   { id: 'lifecycle', label: '生命周期', help: '配置当前普通容器 PostStart / PreStop 钩子。' }
+]
+const imagePullPolicyOptions = [
+  { label: 'IfNotPresent', value: 'IfNotPresent' },
+  { label: 'Always', value: 'Always' },
+  { label: 'Never', value: 'Never' }
 ]
 const deploymentPanels: Array<{ id: DeploymentPanel; label: string; help: string }> = [
   { id: 'basic', label: '基本信息', help: '配置 Deployment 名称、Namespace 和副本数。' },
@@ -350,15 +388,15 @@ const deploymentPanels: Array<{ id: DeploymentPanel; label: string; help: string
 ]
 const podSecurityPanels: Array<{ id: PodSecurityPanel; label: string; help: string }> = [
   { id: 'identity', label: '身份', help: 'ServiceAccount 与 token 自动挂载属于 Pod spec。' },
-  { id: 'pod', label: 'Pod SecurityContext', help: 'runAsUser、runAsGroup、fsGroup、runAsNonRoot 和 seccompProfile 作用于整个 Pod。' },
-  { id: 'container', label: '容器 SecurityContext', help: '容器级 securityContext 会写入普通容器，可覆盖 Pod 级默认值。' }
+  { id: 'pod', label: 'Pod SecurityContext', help: 'runAsUser、runAsGroup、fsGroup、runAsNonRoot 和 seccompProfile 作用于整个 Pod。' }
 ]
 const initContainerPanels: Array<{ id: InitContainerPanel; label: string; help: string }> = [
   { id: 'basic', label: '基础', help: '配置 Init 容器名称、镜像和拉取策略。' },
   { id: 'command', label: '命令', help: 'command 和 args 使用逗号分隔，会分别写入 Kubernetes command / args 数组。' },
   { id: 'env', label: '环境变量', help: '写入 Init 容器 env。' },
   { id: 'resources', label: '资源', help: '写入 Init 容器 resources.requests / limits。' },
-  { id: 'mounts', label: '挂载', help: '选择 Pod 模板中的 ConfigMap、Secret 或 emptyDir，并挂载到 Init 容器。' }
+  { id: 'security', label: '安全', help: '配置 Init 容器 securityContext；常规 Init 容器不支持探针和生命周期钩子。' },
+  { id: 'mounts', label: '挂载', help: '从 Pod 存储卷中选择 volume，并配置 Init 容器 volumeMounts。' }
 ]
 const resourcePanels: Array<{ id: ResourcePanel; label: string; help: string }> = [
   { id: 'cpu', label: 'CPU', help: 'CPU requests / limits' },
@@ -375,10 +413,14 @@ const mountPanels: Array<{ id: MountPanel; label: string; help: string }> = [
   { id: 'persistentVolumeClaim', label: 'PVC', help: '挂载 PersistentVolumeClaim 存储卷' },
   { id: 'emptyDir', label: 'emptyDir', help: 'Pod 临时目录' }
 ]
-const schedulePanels: Array<{ id: SchedulePanel; label: string; help: string }> = [
-  { id: 'node', label: '节点调度', help: '通过 nodeSelector 和节点亲和选择调度目标。' },
-  { id: 'pod', label: 'Pod 调度', help: '通过 Pod 亲和和反亲和控制与其他 Pod 的拓扑关系。' },
-  { id: 'tolerations', label: '容忍', help: '允许 Pod 调度到带有匹配污点的节点。' }
+const podSchedulePanels: Array<{ id: PodSchedulePanel; label: string; help: string }> = [
+  { id: 'affinity', label: 'Pod 亲和', help: '让当前 Pod 倾向或要求与匹配标签的 Pod 落在同一拓扑域，例如同一节点或同一可用区。' },
+  { id: 'antiAffinity', label: 'Pod 反亲和', help: '让当前 Pod 避开匹配标签的 Pod，常用于副本分散到不同节点或可用区。' }
+]
+const nodeSchedulePanels: Array<{ id: NodeSchedulePanel; label: string; help: string }> = [
+  { id: 'selector', label: '节点标签选择', help: 'nodeSelector 是最直接的节点筛选：节点必须同时具备这里填写的全部标签键值。' },
+  { id: 'affinity', label: '节点亲和', help: '节点亲和使用匹配表达式描述节点标签条件；当前表单写入 requiredDuringSchedulingIgnoredDuringExecution。' },
+  { id: 'tolerations', label: '污点容忍', help: '容忍允许 Pod 调度到带有匹配污点的节点；是否最终调度仍取决于其它调度条件。' }
 ]
 const lifecyclePanels: Array<{ id: LifecyclePanel; label: string; help: string }> = [
   { id: 'postStart', label: 'PostStart', help: '容器启动后立即触发的钩子。' },
@@ -392,90 +434,91 @@ const yamlTemplates: Array<{ id: YamlTemplateId; label: string; description: str
   {
     id: 'web',
     label: 'Web 服务',
-    description: 'Nginx/HTTP 服务，模板只预填推荐端口、探针和资源值，名称与镜像可继续修改。',
+    description: 'Nginx/HTTP 服务，模板只预填最小 Deployment、镜像和端口字段。',
     patch: {
       replicas: 2,
-      containerName: 'web',
+      containerName: 'app',
       image: 'nginx:1.27',
-      cpuRequest: '100m',
-      cpuLimit: '500m',
-      memoryRequest: '128Mi',
-      memoryLimit: '512Mi',
-      readinessPath: '/healthz',
-      livenessPath: '/healthz',
-      ports: [{ id: 'http', name: 'http', port: 80, targetPort: 8080, protocol: 'TCP' }],
-      env: [{ id: 'env-1', name: 'APP_ENV', value: 'production' }]
+      cpuRequest: '',
+      cpuLimit: '',
+      memoryRequest: '',
+      memoryLimit: '',
+      readinessPath: '',
+      livenessPath: '',
+      startupPath: '',
+      ports: [{ id: 'http', name: 'http', port: 80, targetPort: 8080, protocol: 'TCP', hostPortEnabled: false, hostPort: null, hostIP: '' }],
+      env: []
     }
   },
   {
     id: 'api',
     label: 'API 服务',
-    description: '后端 API 服务，模板只预填副本、ServiceAccount、探针和资源建议，不锁定名称或镜像。',
+    description: '后端 API 服务，模板只预填最小 Deployment、镜像和端口字段。',
     patch: {
       replicas: 3,
       containerName: 'api',
       image: 'registry.example.com/app/api:1.0.0',
-      serviceAccountName: 'app-api',
-      cpuRequest: '200m',
-      cpuLimit: '1',
-      memoryRequest: '256Mi',
-      memoryLimit: '1Gi',
-      readinessPath: '/readyz',
-      livenessPath: '/livez',
-      startupPath: '/startupz',
-      ports: [{ id: 'http', name: 'http', port: 80, targetPort: 8080, protocol: 'TCP' }],
-      env: [{ id: 'env-1', name: 'APP_ENV', value: 'production' }]
+      serviceAccountName: '',
+      cpuRequest: '',
+      cpuLimit: '',
+      memoryRequest: '',
+      memoryLimit: '',
+      readinessPath: '',
+      livenessPath: '',
+      startupPath: '',
+      ports: [{ id: 'http', name: 'http', port: 80, targetPort: 8080, protocol: 'TCP', hostPortEnabled: false, hostPort: null, hostIP: '' }],
+      env: []
     }
   },
   {
     id: 'worker',
     label: '后台任务',
-    description: '后台消费任务样例，只预填副本、镜像建议和队列变量，选择后仍可调整。',
+    description: '后台消费任务样例，只预填最小 Deployment 和镜像字段。',
     patch: {
       replicas: 1,
       containerName: 'worker',
       image: 'registry.example.com/app/worker:1.0.0',
-      cpuRequest: '100m',
-      cpuLimit: '800m',
-      memoryRequest: '256Mi',
-      memoryLimit: '768Mi',
+      cpuRequest: '',
+      cpuLimit: '',
+      memoryRequest: '',
+      memoryLimit: '',
       readinessPath: '',
       livenessPath: '',
       startupPath: '',
       ports: [],
-      env: [{ id: 'env-1', name: 'QUEUE_NAME', value: 'default' }]
+      env: []
     }
   },
   {
     id: 'db',
     label: '轻量 DB',
-    description: '开发/测试态单副本数据库样例，只预填便于修改的起始值；生产有状态服务建议使用 StatefulSet。',
+    description: '开发/测试态单副本数据库样例，只预填最小 Deployment、镜像和端口字段；生产有状态服务建议使用 StatefulSet。',
     patch: {
       replicas: 1,
       containerName: 'db',
       image: 'postgres:16',
-      cpuRequest: '250m',
-      cpuLimit: '1',
-      memoryRequest: '512Mi',
-      memoryLimit: '2Gi',
+      cpuRequest: '',
+      cpuLimit: '',
+      memoryRequest: '',
+      memoryLimit: '',
       readinessPath: '',
       livenessPath: '',
       startupPath: '',
-      ports: [{ id: 'postgres', name: 'postgres', port: 5432, targetPort: 5432, protocol: 'TCP' }],
-      env: [{ id: 'env-1', name: 'POSTGRES_DB', value: 'app' }]
+      ports: [{ id: 'postgres', name: 'postgres', port: 5432, targetPort: 5432, protocol: 'TCP', hostPortEnabled: false, hostPort: null, hostIP: '' }],
+      env: []
     }
   }
 ]
-const configSourceOptions = reactive<Record<Exclude<MountPanel, 'emptyDir'>, Array<{ label: string; value: string }>>>({
+const configSourceOptions = reactive<Record<Exclude<MountPanel, 'emptyDir'>, ConfigSourceOption[]>>({
   configMap: [
     { label: 'app-config', value: 'app-config' },
     { label: 'nginx-conf', value: 'nginx-conf' },
     { label: 'feature-flags', value: 'feature-flags' }
   ],
   secret: [
-    { label: 'app-secret', value: 'app-secret' },
-    { label: 'db-password', value: 'db-password' },
-    { label: 'registry-credential', value: 'registry-credential' }
+    { label: 'app-secret', value: 'app-secret', secretType: 'Opaque', usage: 'volume' },
+    { label: 'db-password', value: 'db-password', secretType: 'Opaque', usage: 'volume' },
+    { label: 'registry-credential', value: 'registry-credential', secretType: 'kubernetes.io/dockerconfigjson', usage: 'imagePullSecret' }
   ],
   persistentVolumeClaim: [
     { label: 'app-data', value: 'app-data' },
@@ -736,14 +779,33 @@ function removePair(key: keyof CreateFormState, id: string) {
 
 function addPort() {
   markFormSource()
-  createForm.ports.push({ id: nextEntryId('port'), name: 'http', port: 80, targetPort: 8080, protocol: 'TCP' })
+  createForm.ports.push(createEmptyPortEntry('port'))
 }
 
 function removePort(id: string) {
   markFormSource()
-  if (createForm.ports.length <= 1) return
   const index = createForm.ports.findIndex((item) => item.id === id)
   if (index >= 0) createForm.ports.splice(index, 1)
+}
+
+function createEmptyPortEntry(prefix: string): PortEntry {
+  return {
+    id: nextEntryId(prefix),
+    name: '',
+    port: null,
+    targetPort: null,
+    protocol: 'TCP',
+    hostPortEnabled: false,
+    hostPort: null,
+    hostIP: ''
+  }
+}
+
+function updatePortNumberField(port: PortEntry, key: 'port' | 'targetPort' | 'hostPort', event: Event) {
+  markFormSource()
+  const value = inputValue(event).trim()
+  port[key] = value === '' ? null : Number(value)
+  syncLegacyFieldsFromActiveAppContainer()
 }
 
 function addEnv() {
@@ -763,7 +825,7 @@ function createAppContainerEntry(name = `app-${createForm.appContainers.length +
     name,
     image: 'nginx:1.27',
     imagePullPolicy: 'IfNotPresent',
-    ports: [{ id: nextEntryId('app-port'), name: 'http', port: 80, targetPort: 8080, protocol: 'TCP' }],
+    ports: [],
     env: [],
     cpuRequest: '',
     memoryRequest: '',
@@ -791,7 +853,13 @@ function createAppContainerEntry(name = `app-${createForm.appContainers.length +
     startupFailureThreshold: 30,
     startupSuccessThreshold: 1,
     volumeMounts: [],
-    lifecycleHooks: []
+    lifecycleHooks: [],
+    containerRunAsUser: null,
+    containerRunAsGroup: null,
+    containerRunAsNonRoot: '',
+    privileged: '',
+    allowPrivilegeEscalation: '',
+    readOnlyRootFilesystem: ''
   }
 }
 
@@ -830,7 +898,13 @@ function seedAppContainersFromLegacyFields() {
     startupFailureThreshold: createForm.startupFailureThreshold,
     startupSuccessThreshold: createForm.startupSuccessThreshold,
     volumeMounts: createForm.volumeMounts,
-    lifecycleHooks: createForm.lifecycleHooks
+    lifecycleHooks: createForm.lifecycleHooks,
+    containerRunAsUser: createForm.containerRunAsUser,
+    containerRunAsGroup: createForm.containerRunAsGroup,
+    containerRunAsNonRoot: createForm.containerRunAsNonRoot,
+    privileged: createForm.privileged,
+    allowPrivilegeEscalation: createForm.allowPrivilegeEscalation,
+    readOnlyRootFilesystem: createForm.readOnlyRootFilesystem
   })
 }
 
@@ -869,6 +943,12 @@ function syncLegacyFieldsFromActiveAppContainer() {
   createForm.startupSuccessThreshold = container.startupSuccessThreshold
   createForm.volumeMounts = container.volumeMounts
   createForm.lifecycleHooks = container.lifecycleHooks
+  createForm.containerRunAsUser = container.containerRunAsUser
+  createForm.containerRunAsGroup = container.containerRunAsGroup
+  createForm.containerRunAsNonRoot = container.containerRunAsNonRoot
+  createForm.privileged = container.privileged
+  createForm.allowPrivilegeEscalation = container.allowPrivilegeEscalation
+  createForm.readOnlyRootFilesystem = container.readOnlyRootFilesystem
 }
 
 function syncActiveAppContainer() {
@@ -940,6 +1020,19 @@ function updateAppNumberField(container: AppContainerEntry, key: keyof AppContai
   updateAppScalarField(container, key, Number(inputValue(event)) || 0)
 }
 
+function updateAppNullableNumberField(container: AppContainerEntry, key: 'containerRunAsUser' | 'containerRunAsGroup', event: Event) {
+  markFormSource()
+  const value = inputValue(event).trim()
+  container[key] = value === '' ? null : Number(value)
+  syncLegacyFieldsFromActiveAppContainer()
+}
+
+function updateInitNullableNumberField(container: InitContainerEntry, key: 'containerRunAsUser' | 'containerRunAsGroup', event: Event) {
+  markFormSource()
+  const value = inputValue(event).trim()
+  container[key] = value === '' ? null : Number(value)
+}
+
 function updateNullableNumberField(key: keyof CreateFormState, event: Event) {
   markFormSource()
   const value = inputValue(event)
@@ -949,13 +1042,12 @@ function updateNullableNumberField(key: keyof CreateFormState, event: Event) {
 
 function addAppPort(container: AppContainerEntry) {
   markFormSource()
-  container.ports.push({ id: nextEntryId('app-port'), name: 'http', port: 80, targetPort: 8080, protocol: 'TCP' })
+  container.ports.push(createEmptyPortEntry('app-port'))
   syncLegacyFieldsFromActiveAppContainer()
 }
 
 function removeAppPort(container: AppContainerEntry, id: string) {
   markFormSource()
-  if (container.ports.length <= 1) return
   const index = container.ports.findIndex((item) => item.id === id)
   if (index >= 0) container.ports.splice(index, 1)
   syncLegacyFieldsFromActiveAppContainer()
@@ -989,7 +1081,13 @@ function addInitContainer() {
     cpuLimit: '',
     memoryLimit: '',
     env: [],
-    volumeMounts: []
+    volumeMounts: [],
+    containerRunAsUser: null,
+    containerRunAsGroup: null,
+    containerRunAsNonRoot: '',
+    privileged: '',
+    allowPrivilegeEscalation: '',
+    readOnlyRootFilesystem: ''
   })
   activeInitContainerId.value = id
   activePodTemplatePanel.value = 'init'
@@ -1105,8 +1203,12 @@ function setPodSecurityPanel(panel: PodSecurityPanel) {
   activePodSecurityPanel.value = panel
 }
 
-function setSchedulePanel(panel: SchedulePanel) {
-  activeSchedulePanel.value = panel
+function setPodSchedulePanel(panel: PodSchedulePanel) {
+  activePodSchedulePanel.value = panel
+}
+
+function setNodeSchedulePanel(panel: NodeSchedulePanel) {
+  activeNodeSchedulePanel.value = panel
 }
 
 function setLifecyclePanel(panel: LifecyclePanel) {
@@ -1117,15 +1219,10 @@ function setStrategyPanel(panel: StrategyPanel) {
   activeStrategyPanel.value = panel
 }
 
-function setYamlFontSize(size: number | string | boolean | null) {
-  yamlFontSize.value = Number(size) || 13
-  scheduleYamlResize()
-}
-
 function resetCollapsedSections() {
   for (const key of Object.keys(collapsedSections)) delete collapsedSections[key]
   if (createDefinition.value.type === 'deployments') {
-    ;['deployment', 'pod-template', 'pod-security', 'pod-storage', 'deployment-strategy', 'scheduling', 'yaml-template'].forEach((key) => {
+    ;['deployment', 'pod-template', 'pod-security', 'pod-network', 'pod-storage', 'deployment-strategy', 'pod-scheduling', 'node-scheduling', 'yaml-template'].forEach((key) => {
       collapsedSections[key] = true
     })
     currentCreateSchema.value?.sections.forEach((section) => {
@@ -1151,15 +1248,87 @@ function initMountListByType(container: InitContainerEntry, type: MountPanel) {
   return container.volumeMounts.filter((item) => item.type === type)
 }
 
+function podVolumeListByType(type: MountPanel) {
+  return createForm.podVolumes.filter((item) => item.type === type)
+}
+
+function podVolumeSourceSummary(volume: PodVolumeEntry) {
+  if (volume.type === 'emptyDir') return 'emptyDir'
+  return volume.sourceName || '未选择资源'
+}
+
+function podVolumeOptions(type: MountPanel, currentName = '') {
+  const options = podVolumeListByType(type)
+    .filter((volume) => volume.name.trim())
+    .map((volume) => ({
+      label: `${volume.name}${volume.type === 'emptyDir' ? '' : ` -> ${podVolumeSourceSummary(volume)}`}`,
+      value: volume.name
+    }))
+  if (currentName && !options.some((option) => option.value === currentName)) {
+    options.unshift({ label: `${currentName}（YAML 原始卷）`, value: currentName })
+  }
+  return options
+}
+
+function addPodVolume(type: MountPanel = activeMountPanel.value) {
+  markFormSource()
+  const sourceName = type === 'emptyDir' ? '' : sourceOptions(type)[0]?.value ?? ''
+  createForm.podVolumes.push({
+    id: nextEntryId('pod-volume'),
+    type,
+    name: sourceName || `${type === 'persistentVolumeClaim' ? 'pvc' : type}-volume`,
+    sourceName
+  })
+}
+
+function removePodVolume(id: string) {
+  markFormSource()
+  const index = createForm.podVolumes.findIndex((item) => item.id === id)
+  if (index < 0) return
+  const volumeName = createForm.podVolumes[index].name
+  createForm.podVolumes.splice(index, 1)
+  if (volumeName) {
+    createForm.appContainers.forEach((container) => {
+      container.volumeMounts = container.volumeMounts.filter((mount) => mount.name !== volumeName)
+    })
+    createForm.initContainers.forEach((container) => {
+      container.volumeMounts = container.volumeMounts.filter((mount) => mount.name !== volumeName)
+    })
+  }
+  syncLegacyFieldsFromActiveAppContainer()
+}
+
+function onPodVolumeSourceSelect(volume: PodVolumeEntry, value: string | number | boolean | null) {
+  markFormSource()
+  const sourceName = String(value ?? '')
+  volume.sourceName = sourceName
+  if (!volume.name.trim()) volume.name = sourceName
+}
+
+function onVolumeMountSelect(mount: VolumeMountEntry, value: string | number | boolean | null) {
+  markFormSource()
+  const volumeName = String(value ?? '')
+  mount.name = volumeName
+  const volume = createForm.podVolumes.find((item) => item.name === volumeName)
+  if (volume) {
+    mount.type = volume.type
+    mount.sourceName = volume.sourceName
+    if (!mount.mountPath.trim()) mount.mountPath = mountDefaultPath(volume.type)
+    if (volume.type === 'configMap' || volume.type === 'secret') mount.readOnly = true
+  }
+  syncLegacyFieldsFromActiveAppContainer()
+}
+
 function addVolumeMount(type: MountPanel = activeMountPanel.value) {
   markFormSource()
   const targetMounts = activeAppContainer.value?.volumeMounts ?? createForm.volumeMounts
+  const volume = podVolumeListByType(type)[0]
   targetMounts.push({
     id: nextEntryId('mount'),
     type,
-    name: '',
-    sourceName: '',
-    mountPath: '',
+    name: volume?.name ?? '',
+    sourceName: volume?.sourceName ?? '',
+    mountPath: mountDefaultPath(type),
     subPath: '',
     readOnly: type === 'configMap' || type === 'secret'
   })
@@ -1168,12 +1337,13 @@ function addVolumeMount(type: MountPanel = activeMountPanel.value) {
 
 function addInitVolumeMount(container: InitContainerEntry, type: MountPanel = activeMountPanel.value) {
   markFormSource()
+  const volume = podVolumeListByType(type)[0]
   container.volumeMounts.push({
     id: nextEntryId('init-mount'),
     type,
-    name: '',
-    sourceName: '',
-    mountPath: '',
+    name: volume?.name ?? '',
+    sourceName: volume?.sourceName ?? '',
+    mountPath: mountDefaultPath(type),
     subPath: '',
     readOnly: type === 'configMap' || type === 'secret'
   })
@@ -1227,6 +1397,40 @@ function ensureConfigSourceOption(type: Exclude<MountPanel, 'emptyDir'>, name: s
   }
 }
 
+function markSecretAsImagePullSecret(name: string) {
+  const option = configSourceOptions.secret.find((item) => item.value === name)
+  if (!option) return
+  option.usage = 'imagePullSecret'
+  option.secretType = option.secretType || 'kubernetes.io/dockerconfigjson'
+}
+
+function imagePullSecretNames() {
+  return createForm.imagePullSecrets.split(',').map((item) => item.trim()).filter(Boolean)
+}
+
+function isImagePullSecretSelected(name: string) {
+  return imagePullSecretNames().includes(name)
+}
+
+function setImagePullSecretNames(names: string[]) {
+  markFormSource()
+  createForm.imagePullSecrets = Array.from(new Set(names.map((name) => name.trim()).filter(Boolean))).join(', ')
+}
+
+function toggleImagePullSecret(name: string) {
+  const current = imagePullSecretNames()
+  setImagePullSecretNames(current.includes(name) ? current.filter((item) => item !== name) : [...current, name])
+}
+
+function clearImagePullSecrets() {
+  setImagePullSecretNames([])
+  imagePullSecretDropdownOpen.value = false
+}
+
+function addImagePullSecretName(name: string) {
+  setImagePullSecretNames([...imagePullSecretNames(), name])
+}
+
 function onMountSourceSelect(mount: VolumeMountEntry, value: string | number | boolean | null) {
   markFormSource()
   const sourceName = String(value ?? '')
@@ -1267,11 +1471,13 @@ function syncRelatedFormFromYaml() {
   return parsed.value
 }
 
-function openRelatedConfigResource(type: Exclude<MountPanel, 'emptyDir'>, targetMountId?: string) {
+function openRelatedConfigResource(type: Exclude<MountPanel, 'emptyDir'>, targetId?: string, targetKind: RelatedTargetKind = 'app-mount') {
   const targetType: RelatedCreateType = type === 'configMap' ? 'configmaps' : type === 'secret' ? 'secrets' : 'persistent-volume-claims'
   const definition = resourceDefinitions[targetType]
   relatedMountType.value = type
-  relatedMountTargetId.value = targetMountId ?? null
+  relatedTargetKind.value = targetKind
+  relatedMountTargetId.value = targetKind === 'app-mount' ? targetId ?? null : null
+  relatedPodVolumeTargetId.value = targetKind === 'pod-volume' ? targetId ?? null : null
   relatedFormErrors.value = []
   relatedYamlParseError.value = ''
   const namespace = defaultNamespaceFor(definition)
@@ -1294,6 +1500,8 @@ function openRelatedConfigResource(type: Exclude<MountPanel, 'emptyDir'>, target
 function closeRelatedDialog() {
   relatedDialogOpen.value = false
   relatedMountTargetId.value = null
+  relatedPodVolumeTargetId.value = null
+  relatedTargetKind.value = 'app-mount'
   relatedFormErrors.value = []
   relatedYamlParseError.value = ''
 }
@@ -1351,49 +1559,81 @@ function onRelatedYamlInput(event: Event) {
   syncRelatedFormFromYaml()
 }
 
+function ensurePodVolumeForResource(type: Exclude<MountPanel, 'emptyDir'>, name: string, targetVolumeId?: string | null) {
+  let volume = targetVolumeId
+    ? createForm.podVolumes.find((item) => item.id === targetVolumeId)
+    : createForm.podVolumes.find((item) => item.type === type && (item.sourceName === name || item.name === name))
+  if (!volume) {
+    volume = {
+      id: nextEntryId('pod-volume'),
+      type,
+      name,
+      sourceName: name
+    }
+    createForm.podVolumes.push(volume)
+  }
+  volume.type = type
+  volume.name = volume.name.trim() || name
+  volume.sourceName = name
+  return volume
+}
+
 function fillCreatedRelatedResource(name: string) {
   const mountType = relatedMountType.value
   ensureConfigSourceOption(mountType, name)
-  const targetMounts = activeAppContainer.value?.volumeMounts ?? createForm.volumeMounts
-  let mount = relatedMountTargetId.value
-    ? targetMounts.find((item) => item.id === relatedMountTargetId.value)
-    : undefined
-  if (!mount) {
-    mount = {
-      id: nextEntryId('mount'),
-      type: mountType,
-      name,
-      sourceName: name,
-      mountPath: mountDefaultPath(mountType),
-      subPath: '',
-      readOnly: mountType === 'configMap' || mountType === 'secret'
-    }
-    targetMounts.push(mount)
-    activeMountPanel.value = mountType
+  if (relatedTargetKind.value === 'image-pull-secret') {
+    markSecretAsImagePullSecret(name)
+    addImagePullSecretName(name)
+    return
   }
-  mount.type = mountType
-  mount.sourceName = name
-  if (!mount.name.trim()) mount.name = name
-  if (!mount.mountPath.trim()) mount.mountPath = mountDefaultPath(mountType)
-  mount.readOnly = mountType === 'configMap' || mountType === 'secret' ? true : mount.readOnly
+  const podVolume = ensurePodVolumeForResource(mountType, name, relatedPodVolumeTargetId.value)
+  if (relatedTargetKind.value === 'app-mount') {
+    const targetMounts = activeAppContainer.value?.volumeMounts ?? createForm.volumeMounts
+    let mount = relatedMountTargetId.value
+      ? targetMounts.find((item) => item.id === relatedMountTargetId.value)
+      : undefined
+    if (!mount) {
+      mount = {
+        id: nextEntryId('mount'),
+        type: mountType,
+        name: podVolume.name,
+        sourceName: name,
+        mountPath: mountDefaultPath(mountType),
+        subPath: '',
+        readOnly: mountType === 'configMap' || mountType === 'secret'
+      }
+      targetMounts.push(mount)
+      activeMountPanel.value = mountType
+    }
+    mount.type = mountType
+    mount.name = podVolume.name
+    mount.sourceName = name
+    if (!mount.mountPath.trim()) mount.mountPath = mountDefaultPath(mountType)
+    mount.readOnly = mountType === 'configMap' || mountType === 'secret' ? true : mount.readOnly
+  }
   markFormSource()
   syncLegacyFieldsFromActiveAppContainer()
 }
 
-function initContainerVolumeOptions(container: InitContainerEntry, type: Exclude<MountPanel, 'emptyDir'>) {
-  const podMounts = createForm.appContainers
-    .flatMap((appContainer) => appContainer.volumeMounts)
-    .filter((mount) => mount.type === type && mount.sourceName.trim())
-    .map((mount) => ({ label: `${mount.sourceName}（Pod 挂载）`, value: mount.sourceName }))
-  const localMounts = container.volumeMounts
-    .filter((mount) => mount.type === type && mount.sourceName.trim())
-    .map((mount) => ({ label: `${mount.sourceName}（Init 当前）`, value: mount.sourceName }))
-  const seen = new Set<string>()
-  return [...podMounts, ...localMounts, ...configSourceOptions[type]].filter((option) => {
-    if (seen.has(option.value)) return false
-    seen.add(option.value)
-    return true
-  })
+function podVolumeUsage(volume: PodVolumeEntry) {
+  const volumeName = volume.name.trim()
+  if (!volumeName) return []
+  return [
+    ...createForm.appContainers.flatMap((container) => container.volumeMounts
+      .filter((mount) => mount.name === volumeName)
+      .map((mount) => ({
+        id: `${container.id}-${mount.id}`,
+        label: `普通容器 / ${container.name || '未命名'}`,
+        path: mount.mountPath || '未设置路径'
+      }))),
+    ...createForm.initContainers.flatMap((container) => container.volumeMounts
+      .filter((mount) => mount.name === volumeName)
+      .map((mount) => ({
+        id: `${container.id}-${mount.id}`,
+        label: `Init 容器 / ${container.name || '未命名'}`,
+        path: mount.mountPath || '未设置路径'
+      })))
+  ]
 }
 
 async function submitRelatedForm() {
@@ -1433,10 +1673,11 @@ async function submitRelatedForm() {
     [{ clusterId: filters.clusterId, resourceType: definition.type, namespace: namespace || undefined, name, yaml }],
     { ok: true }
   )
+  const fillTargetText = relatedFillTargetText.value
   fillCreatedRelatedResource(name)
   syncYamlFromForm()
   closeRelatedDialog()
-  successMessage.value = `已创建 ${definition.title}/${name}，并回填到当前挂载配置`
+  successMessage.value = `已创建 ${definition.title}/${name}，并回填到${fillTargetText}`
 }
 
 function addNodeAffinity() {
@@ -1518,10 +1759,8 @@ function applyYamlTemplate(templateId: YamlTemplateId | string | number | boolea
   const template = yamlTemplates.find((item) => item.id === templateId)
   if (!template) return
   activeYamlTemplate.value = template.id
-  markFormSource()
+  formErrors.value = []
   const previousName = createForm.name.trim()
-  const previousImage = createForm.image.trim()
-  const defaultImage = `${createDefinition.value.kind.toLowerCase()}:latest`
   const patch = JSON.parse(JSON.stringify(template.patch)) as Partial<CreateFormState>
   Object.assign(createForm, patch)
   if (previousName) {
@@ -1529,7 +1768,6 @@ function applyYamlTemplate(templateId: YamlTemplateId | string | number | boolea
   } else {
     createForm.name = template.id === 'db' ? 'db-sample' : `${template.id}-${createDefinition.value.type}`
   }
-  if (previousImage && previousImage !== defaultImage) createForm.image = previousImage
   createForm.appContainers = []
   seedAppContainersFromLegacyFields()
   activeAppContainerId.value = createForm.appContainers[0]?.id ?? ''
@@ -1742,7 +1980,8 @@ function openCreate() {
   activeProbePanel.value = 'readiness'
   activeMountPanel.value = 'configMap'
   activePodSecurityPanel.value = 'identity'
-  activeSchedulePanel.value = 'node'
+  activePodSchedulePanel.value = 'affinity'
+  activeNodeSchedulePanel.value = 'selector'
   activeLifecyclePanel.value = 'postStart'
   activeStrategyPanel.value = 'strategy'
   activeYamlTemplate.value = 'web'
@@ -2530,7 +2769,7 @@ onMounted(() => {
                 <div v-if="!isSectionCollapsed(sectionKey(section.title))" class="space-y-4">
                   <div v-if="section.title === 'Pod 模板'" class="space-y-4">
                     <div class="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:bg-dark-900/40 dark:text-dark-400">
-                      Pod 模板统一纳管普通容器与 Init 容器。普通容器配置端口、环境变量、资源、探针、生命周期和容器挂载；Init 容器支持 command / args、env、resources 和 volumeMounts，但不配置 readiness、liveness、startup probe 或 lifecycle。Pod 安全、存储和调度在下方以 Pod 级配置统一生效。
+                      Pod 模板统一纳管普通容器与 Init 容器。普通容器配置基础信息、端口、环境变量、资源、安全、探针、生命周期和容器挂载；Init 容器支持 command / args、env、resources 和 volumeMounts，但不配置 readiness、liveness、startup probe 或 lifecycle。Pod 安全、存储卷和调度在下方以 Pod 级配置统一生效。
                     </div>
                     <div class="inline-flex w-full rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-dark-700 dark:bg-dark-900 sm:w-fit">
                       <button
@@ -2638,22 +2877,16 @@ onMounted(() => {
                   </template>
 
                   <div v-else-if="activePodTemplatePanel === 'app'" class="space-y-4">
-                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <div class="inline-flex w-full flex-wrap rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-dark-700 dark:bg-dark-900 sm:w-fit">
-                        <button
-                          v-for="panel in appContainerPanels"
-                          :key="panel.id"
-                          type="button"
-                          class="flex-1 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-semibold transition-all sm:flex-none"
-                          :class="segmentButtonClass(activeAppContainerPanel === panel.id)"
-                          @click="setAppContainerPanel(panel.id)"
-                        >
-                          {{ panel.label }}
-                        </button>
-                      </div>
-                      <button class="btn btn-secondary btn-sm" type="button" @click="addAppContainer">
-                        <Icon name="plus" size="sm" />
-                        添加普通容器
+                    <div class="inline-flex w-full flex-wrap rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-dark-700 dark:bg-dark-900 sm:w-fit">
+                      <button
+                        v-for="panel in appContainerPanels"
+                        :key="panel.id"
+                        type="button"
+                        class="flex-1 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-semibold transition-all sm:flex-none"
+                        :class="segmentButtonClass(activeAppContainerPanel === panel.id)"
+                        @click="setAppContainerPanel(panel.id)"
+                      >
+                        {{ panel.label }}
                       </button>
                     </div>
                     <p class="text-xs leading-5 text-gray-500 dark:text-dark-400">
@@ -2661,16 +2894,22 @@ onMounted(() => {
                     </p>
 
                     <div v-if="createForm.appContainers.length" class="space-y-3">
-                      <div class="flex flex-wrap gap-2">
-                        <button
-                          v-for="container in createForm.appContainers"
-                          :key="container.id"
-                          type="button"
-                          class="rounded-lg border px-3 py-2 text-sm font-semibold transition-all"
-                          :class="activeAppContainerId === container.id ? 'border-primary-500 bg-primary-50 text-primary-700 dark:border-primary-500 dark:bg-primary-950/30 dark:text-primary-300' : 'border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-dark-700 dark:text-dark-300 dark:hover:bg-dark-800'"
-                          @click="activeAppContainerId = container.id; syncLegacyFieldsFromActiveAppContainer()"
-                        >
-                          {{ container.name || '未命名普通容器' }}
+                      <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div class="flex min-w-0 flex-wrap gap-2">
+                          <button
+                            v-for="container in createForm.appContainers"
+                            :key="container.id"
+                            type="button"
+                            class="rounded-lg border px-3 py-2 text-sm font-semibold transition-all"
+                            :class="activeAppContainerId === container.id ? 'border-primary-500 bg-primary-50 text-primary-700 dark:border-primary-500 dark:bg-primary-950/30 dark:text-primary-300' : 'border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-dark-700 dark:text-dark-300 dark:hover:bg-dark-800'"
+                            @click="activeAppContainerId = container.id; syncLegacyFieldsFromActiveAppContainer()"
+                          >
+                            {{ container.name || '未命名普通容器' }}
+                          </button>
+                        </div>
+                        <button class="btn btn-danger btn-sm shrink-0 sm:ml-auto" type="button" @click="addAppContainer">
+                          <Icon name="plus" size="sm" />
+                          添加普通容器
                         </button>
                       </div>
 
@@ -2689,30 +2928,44 @@ onMounted(() => {
                               <span class="input-label">镜像拉取策略</span>
                               <Select
                                 :model-value="activeAppContainer.imagePullPolicy"
-                                :options="[{ label: 'IfNotPresent', value: 'IfNotPresent' }, { label: 'Always', value: 'Always' }, { label: 'Never', value: 'Never' }]"
+                                :options="imagePullPolicyOptions"
                                 @update:model-value="updateAppScalarField(activeAppContainer, 'imagePullPolicy', $event)"
                               />
                             </label>
                           </div>
-                          <button class="btn btn-secondary btn-sm" type="button" :disabled="createForm.appContainers.length <= 1" @click="removeAppContainer(activeAppContainer.id)">
-                            <Icon name="trash" size="sm" />
-                            移除当前普通容器
-                          </button>
-                        </div>
-
-                        <div v-else-if="activeAppContainerPanel === 'ports'" class="space-y-2">
-                          <div v-for="port in activeAppContainer.ports" :key="port.id" class="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_100px_100px_112px_auto]">
-                            <input v-model="port.name" class="input" placeholder="名称" @focus="markFormSource" />
-                            <input v-model.number="port.port" class="input" min="1" type="number" placeholder="Port" @focus="markFormSource" />
-                            <input v-model.number="port.targetPort" class="input" min="1" type="number" placeholder="Target" @focus="markFormSource" />
-                            <Select v-model="port.protocol" :options="[{ label: 'TCP', value: 'TCP' }, { label: 'UDP', value: 'UDP' }]" />
-                            <button class="btn btn-secondary btn-sm" type="button" @click="removeAppPort(activeAppContainer, port.id)">
-                              <Icon name="trash" size="sm" />
+                          <div class="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:bg-dark-900/40 dark:text-dark-400">
+                            私有仓库认证使用 Pod 级 imagePullSecrets，在下方“Pod 安全 / 身份”里统一配置，普通容器和 Init 容器共享。
+                          </div>
+                          <div class="space-y-2">
+                            <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                              <span class="input-label">端口</span>
+                              <span class="text-xs text-gray-400 dark:text-dark-500">为空时不写入 ports；hostPort 需显式勾选后才写入。</span>
+                            </div>
+                            <div v-if="!activeAppContainer.ports.length" class="rounded-xl border border-gray-100 px-4 py-3 text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
+                              当前普通容器未配置端口。
+                            </div>
+                            <div v-for="port in activeAppContainer.ports" :key="port.id" class="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_110px_120px_112px_150px_120px_auto]">
+                              <input v-model="port.name" class="input" placeholder="名称" @focus="markFormSource" />
+                              <input class="input" min="1" type="number" :value="port.targetPort ?? ''" placeholder="containerPort" @input="updatePortNumberField(port, 'targetPort', $event)" />
+                              <label class="flex h-11 items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 text-sm text-gray-600 dark:border-dark-600 dark:bg-dark-800 dark:text-dark-300">
+                                <input v-model="port.hostPortEnabled" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500" @change="markFormSource(); syncLegacyFieldsFromActiveAppContainer()" />
+                                hostPort
+                              </label>
+                              <input class="input" min="1" type="number" :disabled="!port.hostPortEnabled" :value="port.hostPort ?? ''" placeholder="hostPort" @input="updatePortNumberField(port, 'hostPort', $event)" />
+                              <Select v-model="port.protocol" :options="[{ label: 'TCP', value: 'TCP' }, { label: 'UDP', value: 'UDP' }]" />
+                              <input v-model="port.hostIP" class="input" :disabled="!port.hostPortEnabled" placeholder="hostIP" @focus="markFormSource" />
+                              <button class="btn btn-secondary btn-sm" type="button" @click="removeAppPort(activeAppContainer, port.id)">
+                                <Icon name="trash" size="sm" />
+                              </button>
+                            </div>
+                            <button class="btn btn-secondary btn-sm" type="button" @click="addAppPort(activeAppContainer)">
+                              <Icon name="plus" size="sm" />
+                              添加端口
                             </button>
                           </div>
-                          <button class="btn btn-secondary btn-sm" type="button" @click="addAppPort(activeAppContainer)">
-                            <Icon name="plus" size="sm" />
-                            添加端口
+                          <button class="btn btn-danger btn-sm" type="button" :disabled="createForm.appContainers.length <= 1" @click="removeAppContainer(activeAppContainer.id)">
+                            <Icon name="trash" size="sm" />
+                            移除当前普通容器
                           </button>
                         </div>
 
@@ -2753,6 +3006,38 @@ onMounted(() => {
                                 @input="updateAppTextField(activeAppContainer, field.key as keyof AppContainerEntry, $event)"
                               />
                               <span class="input-hint">{{ field.help }}</span>
+                            </label>
+                          </div>
+                        </div>
+
+                        <div v-else-if="activeAppContainerPanel === 'security'" class="space-y-3">
+                          <div class="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:bg-dark-900/40 dark:text-dark-400">
+                            只影响当前选中的普通容器，生成到该容器的 securityContext；Pod 级安全身份仍在下方“Pod 安全”中配置。
+                          </div>
+                          <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                            <label class="block">
+                              <span class="input-label">runAsUser</span>
+                              <input class="input" min="0" type="number" :value="activeAppContainer.containerRunAsUser ?? ''" placeholder="默认" @input="updateAppNullableNumberField(activeAppContainer, 'containerRunAsUser', $event)" />
+                            </label>
+                            <label class="block">
+                              <span class="input-label">runAsGroup</span>
+                              <input class="input" min="0" type="number" :value="activeAppContainer.containerRunAsGroup ?? ''" placeholder="默认" @input="updateAppNullableNumberField(activeAppContainer, 'containerRunAsGroup', $event)" />
+                            </label>
+                            <label class="block">
+                              <span class="input-label">runAsNonRoot</span>
+                              <Select :model-value="activeAppContainer.containerRunAsNonRoot" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateAppScalarField(activeAppContainer, 'containerRunAsNonRoot', $event)" />
+                            </label>
+                            <label class="block">
+                              <span class="input-label">privileged</span>
+                              <Select :model-value="activeAppContainer.privileged" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateAppScalarField(activeAppContainer, 'privileged', $event)" />
+                            </label>
+                            <label class="block">
+                              <span class="input-label">allowPrivilegeEscalation</span>
+                              <Select :model-value="activeAppContainer.allowPrivilegeEscalation" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateAppScalarField(activeAppContainer, 'allowPrivilegeEscalation', $event)" />
+                            </label>
+                            <label class="block">
+                              <span class="input-label">readOnlyRootFilesystem</span>
+                              <Select :model-value="activeAppContainer.readOnlyRootFilesystem" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateAppScalarField(activeAppContainer, 'readOnlyRootFilesystem', $event)" />
                             </label>
                           </div>
                         </div>
@@ -2807,24 +3092,23 @@ onMounted(() => {
                             </button>
                           </div>
                           <div class="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:bg-dark-900/40 dark:text-dark-400">
-                            {{ mountPanels.find((panel) => panel.id === activeMountPanel)?.help }}。未添加条目时不会写入 volumes / volumeMounts。
+                            {{ mountPanels.find((panel) => panel.id === activeMountPanel)?.help }}。未添加条目时不会写入 volumeMounts；Pod volumes 请在“Pod 存储卷”中维护。
                           </div>
                           <div v-if="mountListByType(activeMountPanel).length" class="space-y-3">
                             <div v-for="mount in mountListByType(activeMountPanel)" :key="mount.id" class="rounded-xl border border-gray-100 p-3 dark:border-dark-700">
-                              <div class="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)_minmax(0,1fr)]">
-                                <label class="block">
-                                  <span class="input-label">Volume 名称</span>
-                                  <input v-model="mount.name" class="input" placeholder="app-config" @focus="markFormSource" />
-                                </label>
-                                <div v-if="mount.type !== 'emptyDir'" class="block space-y-2">
-                                  <span class="input-label">{{ mountSourceLabel(mount.type) }}</span>
+                              <div class="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.9fr)]">
+                                <div class="block space-y-2">
+                                  <span class="input-label">Pod Volume</span>
                                   <Select
-                                    :model-value="sourceOptions(mount.type).some((option) => option.value === mount.sourceName) ? mount.sourceName : null"
-                                    :options="sourceOptions(mount.type)"
-                                    :placeholder="mount.sourceName || '请选择已有资源'"
+                                    :model-value="podVolumeOptions(mount.type, mount.name).some((option) => option.value === mount.name) ? mount.name : null"
+                                    :options="podVolumeOptions(mount.type, mount.name)"
+                                    :placeholder="mount.name || '请选择 Pod 存储卷'"
                                     searchable
-                                    @update:model-value="onMountSourceSelect(mount, $event)"
+                                    @update:model-value="onVolumeMountSelect(mount, $event)"
                                   />
+                                  <p v-if="!podVolumeListByType(mount.type).length" class="text-xs leading-5 text-amber-600 dark:text-amber-400">
+                                    请先在 Pod 存储卷中添加 {{ mountPanels.find((panel) => panel.id === mount.type)?.label }} 卷。
+                                  </p>
                                 </div>
                                 <label class="block">
                                   <span class="input-label">挂载路径</span>
@@ -2843,10 +3127,6 @@ onMounted(() => {
                                     <Icon name="trash" size="sm" />
                                     移除
                                   </button>
-                                  <button v-if="mount.type !== 'emptyDir'" class="btn btn-secondary btn-sm w-full" type="button" @click="openRelatedConfigResource(mount.type, mount.id)">
-                                    <Icon name="plus" size="sm" />
-                                    新建并选中
-                                  </button>
                                 </div>
                               </div>
                             </div>
@@ -2854,13 +3134,13 @@ onMounted(() => {
                           <div v-else class="rounded-xl border border-gray-100 px-4 py-6 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
                             当前分类还没有挂载项。
                           </div>
-                          <button class="btn btn-secondary btn-sm" type="button" @click="addVolumeMount()">
+                          <button class="btn btn-danger btn-sm" type="button" @click="addVolumeMount()">
                             <Icon name="plus" size="sm" />
                             添加 {{ mountPanels.find((panel) => panel.id === activeMountPanel)?.label }} 挂载
                           </button>
-                          <button v-if="activeMountPanel !== 'emptyDir'" class="btn btn-secondary btn-sm" type="button" @click="openRelatedConfigResource(activeMountPanel)">
+                          <button v-if="activeMountPanel !== 'emptyDir'" class="btn btn-danger btn-sm" type="button" @click="openRelatedConfigResource(activeMountPanel, undefined, 'app-mount')">
                             <Icon name="plus" size="sm" />
-                            创建 {{ mountCreateLabel(activeMountPanel) }}
+                            新建 {{ mountCreateLabel(activeMountPanel) }} 并挂载
                           </button>
                         </div>
 
@@ -2921,7 +3201,7 @@ onMounted(() => {
                   </div>
 
                   <div v-else class="space-y-4">
-                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
                       <div class="inline-flex w-full flex-wrap rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-dark-700 dark:bg-dark-900 sm:w-fit">
                         <button
                           v-for="panel in initContainerPanels"
@@ -2934,26 +3214,28 @@ onMounted(() => {
                           {{ panel.label }}
                         </button>
                       </div>
-                      <button class="btn btn-secondary btn-sm" type="button" @click="addInitContainer">
-                        <Icon name="plus" size="sm" />
-                        添加 Init 容器
-                      </button>
                     </div>
                     <p class="text-xs leading-5 text-gray-500 dark:text-dark-400">
                       {{ initContainerPanels.find((panel) => panel.id === activeInitContainerPanel)?.help }}
                     </p>
 
                     <div v-if="createForm.initContainers.length" class="space-y-3">
-                      <div class="flex flex-wrap gap-2">
-                        <button
-                          v-for="container in createForm.initContainers"
-                          :key="container.id"
-                          type="button"
-                          class="rounded-lg border px-3 py-2 text-sm font-semibold transition-all"
-                          :class="activeInitContainerId === container.id ? 'border-primary-500 bg-primary-50 text-primary-700 dark:border-primary-500 dark:bg-primary-950/30 dark:text-primary-300' : 'border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-dark-700 dark:text-dark-300 dark:hover:bg-dark-800'"
-                          @click="activeInitContainerId = container.id"
-                        >
-                          {{ container.name || '未命名 Init 容器' }}
+                      <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div class="flex min-w-0 flex-wrap gap-2">
+                          <button
+                            v-for="container in createForm.initContainers"
+                            :key="container.id"
+                            type="button"
+                            class="rounded-lg border px-3 py-2 text-sm font-semibold transition-all"
+                            :class="activeInitContainerId === container.id ? 'border-primary-500 bg-primary-50 text-primary-700 dark:border-primary-500 dark:bg-primary-950/30 dark:text-primary-300' : 'border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-dark-700 dark:text-dark-300 dark:hover:bg-dark-800'"
+                            @click="activeInitContainerId = container.id"
+                          >
+                            {{ container.name || '未命名 Init 容器' }}
+                          </button>
+                        </div>
+                        <button class="btn btn-danger btn-sm shrink-0 sm:ml-auto" type="button" @click="addInitContainer">
+                          <Icon name="plus" size="sm" />
+                          添加 Init 容器
                         </button>
                       </div>
 
@@ -2972,12 +3254,15 @@ onMounted(() => {
                               <span class="input-label">镜像拉取策略</span>
                               <Select
                                 :model-value="activeInitContainer.imagePullPolicy"
-                                :options="[{ label: 'IfNotPresent', value: 'IfNotPresent' }, { label: 'Always', value: 'Always' }, { label: 'Never', value: 'Never' }]"
+                                :options="imagePullPolicyOptions"
                                 @update:model-value="updateInitScalarField(activeInitContainer, 'imagePullPolicy', $event)"
                               />
                             </label>
                           </div>
-                          <button class="btn btn-secondary btn-sm" type="button" @click="removeInitContainer(activeInitContainer.id)">
+                          <div class="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:bg-dark-900/40 dark:text-dark-400">
+                            私有仓库认证使用 Pod 级 imagePullSecrets，在下方“Pod 安全 / 身份”里统一配置，普通容器和 Init 容器共享。
+                          </div>
+                          <button class="btn btn-danger btn-sm" type="button" @click="removeInitContainer(activeInitContainer.id)">
                             <Icon name="trash" size="sm" />
                             移除当前 Init 容器
                           </button>
@@ -3029,6 +3314,38 @@ onMounted(() => {
                           </label>
                         </div>
 
+                        <div v-else-if="activeInitContainerPanel === 'security'" class="space-y-3">
+                          <div class="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:bg-dark-900/40 dark:text-dark-400">
+                            写入当前 Init 容器 securityContext。常规 Init 容器不支持 lifecycle、readinessProbe、livenessProbe 或 startupProbe，因此这里不提供探针和生命周期配置。
+                          </div>
+                          <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                            <label class="block">
+                              <span class="input-label">runAsUser</span>
+                              <input class="input" min="0" type="number" :value="activeInitContainer.containerRunAsUser ?? ''" placeholder="默认" @input="updateInitNullableNumberField(activeInitContainer, 'containerRunAsUser', $event)" />
+                            </label>
+                            <label class="block">
+                              <span class="input-label">runAsGroup</span>
+                              <input class="input" min="0" type="number" :value="activeInitContainer.containerRunAsGroup ?? ''" placeholder="默认" @input="updateInitNullableNumberField(activeInitContainer, 'containerRunAsGroup', $event)" />
+                            </label>
+                            <label class="block">
+                              <span class="input-label">runAsNonRoot</span>
+                              <Select :model-value="activeInitContainer.containerRunAsNonRoot" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateInitScalarField(activeInitContainer, 'containerRunAsNonRoot', $event)" />
+                            </label>
+                            <label class="block">
+                              <span class="input-label">privileged</span>
+                              <Select :model-value="activeInitContainer.privileged" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateInitScalarField(activeInitContainer, 'privileged', $event)" />
+                            </label>
+                            <label class="block">
+                              <span class="input-label">allowPrivilegeEscalation</span>
+                              <Select :model-value="activeInitContainer.allowPrivilegeEscalation" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateInitScalarField(activeInitContainer, 'allowPrivilegeEscalation', $event)" />
+                            </label>
+                            <label class="block">
+                              <span class="input-label">readOnlyRootFilesystem</span>
+                              <Select :model-value="activeInitContainer.readOnlyRootFilesystem" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateInitScalarField(activeInitContainer, 'readOnlyRootFilesystem', $event)" />
+                            </label>
+                          </div>
+                        </div>
+
                         <div v-else class="space-y-3">
                           <div class="inline-flex w-full rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-dark-700 dark:bg-dark-900 sm:w-fit">
                             <button
@@ -3049,20 +3366,19 @@ onMounted(() => {
                               :key="mount.id"
                               class="rounded-xl border border-gray-100 p-3 dark:border-dark-700"
                             >
-                              <div class="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)_minmax(0,1fr)]">
-                                <label class="block">
-                                  <span class="input-label">Volume 名称</span>
-                                  <input v-model="mount.name" class="input" placeholder="init-config" @focus="markFormSource" />
-                                </label>
-                                <div v-if="mount.type !== 'emptyDir'" class="block space-y-2">
-                                  <span class="input-label">{{ mountSourceLabel(mount.type) }}</span>
+                              <div class="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,0.9fr)]">
+                                <div class="block space-y-2">
+                                  <span class="input-label">Pod Volume</span>
                                   <Select
-                                    :model-value="initContainerVolumeOptions(activeInitContainer, mount.type).some((option) => option.value === mount.sourceName) ? mount.sourceName : null"
-                                    :options="initContainerVolumeOptions(activeInitContainer, mount.type)"
-                                    :placeholder="mount.sourceName || '请选择已有资源'"
+                                    :model-value="podVolumeOptions(mount.type, mount.name).some((option) => option.value === mount.name) ? mount.name : null"
+                                    :options="podVolumeOptions(mount.type, mount.name)"
+                                    :placeholder="mount.name || '请选择 Pod 存储卷'"
                                     searchable
-                                    @update:model-value="onMountSourceSelect(mount, $event)"
+                                    @update:model-value="onVolumeMountSelect(mount, $event)"
                                   />
+                                  <p v-if="!podVolumeListByType(mount.type).length" class="text-xs leading-5 text-amber-600 dark:text-amber-400">
+                                    请先在 Pod 存储卷中添加 {{ mountPanels.find((panel) => panel.id === mount.type)?.label }} 卷。
+                                  </p>
                                 </div>
                                 <label class="block">
                                   <span class="input-label">挂载路径</span>
@@ -3088,7 +3404,7 @@ onMounted(() => {
                           <div v-else class="rounded-xl border border-gray-100 px-4 py-6 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
                             当前 Init 容器还没有此类挂载。
                           </div>
-                          <button class="btn btn-secondary btn-sm" type="button" @click="addInitVolumeMount(activeInitContainer)">
+                          <button class="btn btn-danger btn-sm" type="button" @click="addInitVolumeMount(activeInitContainer)">
                             <Icon name="plus" size="sm" />
                             添加 {{ mountPanels.find((panel) => panel.id === activeMountPanel)?.label }} 挂载
                           </button>
@@ -3096,8 +3412,12 @@ onMounted(() => {
                       </div>
                     </div>
 
-                    <div v-else class="rounded-xl border border-gray-100 px-4 py-8 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
-                      当前未配置 Init 容器；需要初始化数据库、拉取配置或等待依赖时再添加。
+                    <div v-else class="flex flex-col gap-3 rounded-xl border border-dashed border-gray-200 bg-gray-50 p-3 dark:border-dark-700 dark:bg-dark-900/40 sm:flex-row sm:items-center sm:justify-between">
+                      <span class="text-sm text-gray-500 dark:text-dark-400">当前未配置 Init 容器；需要初始化数据库、拉取配置或等待依赖时再添加。</span>
+                      <button class="btn btn-danger btn-sm shrink-0 sm:ml-auto" type="button" @click="addInitContainer">
+                        <Icon name="plus" size="sm" />
+                        添加 Init 容器
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -3255,10 +3575,6 @@ onMounted(() => {
                             <Icon name="trash" size="sm" />
                             移除
                           </button>
-                          <button v-if="mount.type !== 'emptyDir'" class="btn btn-secondary btn-sm w-full" type="button" @click="openRelatedConfigResource(mount.type, mount.id)">
-                            <Icon name="plus" size="sm" />
-                            新建并选中
-                          </button>
                         </div>
                       </div>
                     </div>
@@ -3268,11 +3584,11 @@ onMounted(() => {
                     当前分类还没有挂载项。
                   </div>
 
-                  <button class="btn btn-secondary btn-sm" type="button" @click="addVolumeMount()">
+                  <button class="btn btn-danger btn-sm" type="button" @click="addVolumeMount()">
                     <Icon name="plus" size="sm" />
                     添加 {{ mountPanels.find((panel) => panel.id === activeMountPanel)?.label }} 挂载
                   </button>
-                  <button v-if="activeMountPanel !== 'emptyDir'" class="btn btn-secondary btn-sm" type="button" @click="openRelatedConfigResource(activeMountPanel)">
+                  <button v-if="activeMountPanel !== 'emptyDir'" class="btn btn-danger btn-sm" type="button" @click="openRelatedConfigResource(activeMountPanel)">
                     <Icon name="plus" size="sm" />
                     创建 {{ mountCreateLabel(activeMountPanel) }}
                   </button>
@@ -3349,7 +3665,7 @@ onMounted(() => {
                   <button type="button" class="flex w-full items-start justify-between gap-3 text-left" @click="toggleSection('pod-security')">
                     <span class="min-w-0">
                       <span class="block text-sm font-semibold text-gray-900 dark:text-white">Pod 安全</span>
-                      <span class="block text-xs leading-5 text-gray-500 dark:text-dark-400">身份、Pod securityContext 和容器 securityContext 按 Kubernetes 字段归属分组配置。</span>
+                      <span class="block text-xs leading-5 text-gray-500 dark:text-dark-400">ServiceAccount、imagePullSecrets 与 Pod securityContext 按 Kubernetes Pod spec 归属配置。</span>
                     </span>
                     <Icon :name="isSectionCollapsed('pod-security') ? 'chevronDown' : 'chevronUp'" size="sm" class="mt-1 shrink-0 text-gray-400" />
                   </button>
@@ -3385,6 +3701,72 @@ onMounted(() => {
                       />
                       <span class="input-hint">默认不写入 YAML，由集群和 ServiceAccount 默认值决定。</span>
                     </label>
+                    <div class="block md:col-span-2">
+                      <span class="input-label">镜像拉取密钥</span>
+                      <div class="space-y-2">
+                        <div class="relative">
+                          <button
+                            type="button"
+                            class="flex w-full items-center justify-between gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-left text-sm text-gray-900 transition hover:border-gray-300 focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/30 dark:border-dark-600 dark:bg-dark-800 dark:text-gray-100 dark:hover:border-dark-500"
+                            :aria-expanded="imagePullSecretDropdownOpen"
+                            @click="imagePullSecretDropdownOpen = !imagePullSecretDropdownOpen"
+                          >
+                            <span class="min-w-0 flex-1 truncate">{{ imagePullSecretTriggerText }}</span>
+                            <Icon name="chevronDown" size="md" :class="['shrink-0 text-gray-400 transition-transform duration-200', imagePullSecretDropdownOpen && 'rotate-180']" />
+                          </button>
+                          <div
+                            v-if="imagePullSecretDropdownOpen"
+                            class="absolute z-30 mt-1 max-h-64 w-full overflow-y-auto rounded-xl border border-gray-200 bg-white py-1 shadow-lg shadow-black/10 dark:border-dark-700 dark:bg-dark-800 dark:shadow-black/30"
+                          >
+                            <button
+                              v-for="option in imagePullSecretOptions"
+                              :key="option.value"
+                              type="button"
+                              class="flex w-full min-w-0 items-center gap-3 px-4 py-2.5 text-left text-sm text-gray-700 transition hover:bg-gray-50 dark:text-dark-200 dark:hover:bg-dark-700"
+                              @click="toggleImagePullSecret(option.value)"
+                            >
+                              <span
+                                :class="[
+                                  'flex h-4 w-4 shrink-0 items-center justify-center rounded border',
+                                  isImagePullSecretSelected(option.value)
+                                    ? 'border-primary-500 bg-primary-500 text-white'
+                                    : 'border-gray-300 bg-white dark:border-dark-500 dark:bg-dark-800'
+                                ]"
+                              >
+                                <Icon v-if="isImagePullSecretSelected(option.value)" name="check" size="xs" />
+                              </span>
+                              <span class="min-w-0 flex-1 truncate">{{ option.label }}</span>
+                              <span
+                                v-if="option.secretType"
+                                class="shrink-0 rounded-lg bg-gray-100 px-2 py-0.5 text-[11px] text-gray-500 dark:bg-dark-700 dark:text-dark-300"
+                              >
+                                {{ option.secretType }}
+                              </span>
+                            </button>
+                            <div v-if="!imagePullSecretOptions.length" class="px-4 py-6 text-center text-sm text-gray-500 dark:text-dark-400">
+                              当前 Namespace 暂无镜像仓库认证 Secret。
+                            </div>
+                          </div>
+                        </div>
+                        <div class="flex flex-wrap items-center gap-2">
+                          <button class="btn btn-danger btn-sm" type="button" @click="openRelatedConfigResource('secret', undefined, 'image-pull-secret')">
+                            <Icon name="plus" size="sm" />
+                            新建 Secret 并选中
+                          </button>
+                          <button v-if="imagePullSecretNames().length" class="btn btn-secondary btn-sm" type="button" @click="clearImagePullSecrets">
+                            <Icon name="xCircle" size="sm" />
+                            清空
+                          </button>
+                          <span v-if="imagePullSecretNames().length" class="text-xs text-gray-500 dark:text-dark-400">
+                            已选择：{{ imagePullSecretNames().join(', ') }}
+                          </span>
+                          <span v-else class="text-xs text-gray-500 dark:text-dark-400">
+                            未选择时不写入 imagePullSecrets。
+                          </span>
+                        </div>
+                      </div>
+                      <span class="input-hint">从当前 Namespace 的镜像仓库认证 Secret 中选择；普通容器和 Init 容器共享，多选后自动写入 imagePullSecrets。</span>
+                    </div>
                   </div>
                   <div v-else-if="activePodSecurityPanel === 'pod'" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                     <label class="block">
@@ -3412,31 +3794,76 @@ onMounted(() => {
                       <input class="input" :value="createForm.seccompLocalhostProfile" placeholder="profiles/audit.json" :disabled="createForm.seccompProfileType !== 'Localhost'" @input="updateTextField('seccompLocalhostProfile', $event)" />
                     </label>
                   </div>
-                  <div v-else class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                </div>
+              </section>
+
+              <section v-if="createDefinition.type === 'deployments'" class="rounded-xl border border-gray-100 p-4 dark:border-dark-700">
+                <div class="mb-4 space-y-3">
+                  <button type="button" class="flex w-full items-start justify-between gap-3 text-left" @click="toggleSection('pod-network')">
+                    <span class="min-w-0">
+                      <span class="block text-sm font-semibold text-gray-900 dark:text-white">Pod 网络</span>
+                      <span class="block text-xs leading-5 text-gray-500 dark:text-dark-400">hostNetwork、dnsPolicy 和 dnsConfig 都属于 Pod 级网络配置，普通容器和 Init 容器共享。</span>
+                    </span>
+                    <Icon :name="isSectionCollapsed('pod-network') ? 'chevronDown' : 'chevronUp'" size="sm" class="mt-1 shrink-0 text-gray-400" />
+                  </button>
+                </div>
+
+                <div v-if="!isSectionCollapsed('pod-network')" class="space-y-4">
+                  <div class="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:bg-dark-900/40 dark:text-dark-400">
+                    默认不写入网络字段，沿用集群默认 DNS 策略；启用宿主机网络时通常配合 ClusterFirstWithHostNet，自定义 DNS 时通常选择 None 并填写 dnsConfig。
+                  </div>
+                  <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                     <label class="block">
-                      <span class="input-label">runAsUser</span>
-                      <input class="input" min="0" type="number" :value="createForm.containerRunAsUser ?? ''" placeholder="默认" @input="updateNullableNumberFormField('containerRunAsUser', $event)" />
+                      <span class="input-label">宿主机网络 hostNetwork</span>
+                      <Select
+                        :model-value="createForm.hostNetwork"
+                        :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]"
+                        @update:model-value="updateScalarField('hostNetwork', $event)"
+                      />
+                      <span class="input-hint">开启后 Pod 使用节点网络命名空间；需要谨慎处理端口冲突和 DNS 策略。</span>
                     </label>
                     <label class="block">
-                      <span class="input-label">runAsGroup</span>
-                      <input class="input" min="0" type="number" :value="createForm.containerRunAsGroup ?? ''" placeholder="默认" @input="updateNullableNumberFormField('containerRunAsGroup', $event)" />
+                      <span class="input-label">DNS 策略 dnsPolicy</span>
+                      <Select
+                        :model-value="createForm.dnsPolicy"
+                        :options="[
+                          { label: '默认', value: '' },
+                          { label: 'ClusterFirst', value: 'ClusterFirst' },
+                          { label: 'Default', value: 'Default' },
+                          { label: 'ClusterFirstWithHostNet', value: 'ClusterFirstWithHostNet' },
+                          { label: 'None', value: 'None' }
+                        ]"
+                        @update:model-value="updateScalarField('dnsPolicy', $event)"
+                      />
+                      <span class="input-hint">ClusterFirst 是集群内服务默认策略；hostNetwork 场景常用 ClusterFirstWithHostNet。</span>
                     </label>
                     <label class="block">
-                      <span class="input-label">runAsNonRoot</span>
-                      <Select :model-value="createForm.containerRunAsNonRoot" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateScalarField('containerRunAsNonRoot', $event)" />
+                      <span class="input-label">DNS 服务器 nameservers</span>
+                      <input class="input" :value="createForm.dnsNameservers" placeholder="10.96.0.10, 8.8.8.8" @input="updateTextField('dnsNameservers', $event)" />
+                      <span class="input-hint">逗号分隔，写入 dnsConfig.nameservers。</span>
                     </label>
-                    <label class="block">
-                      <span class="input-label">privileged</span>
-                      <Select :model-value="createForm.privileged" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateScalarField('privileged', $event)" />
+                    <label class="block md:col-span-2">
+                      <span class="input-label">DNS 搜索域 searches</span>
+                      <input class="input" :value="createForm.dnsSearches" placeholder="svc.cluster.local, cluster.local" @input="updateTextField('dnsSearches', $event)" />
+                      <span class="input-hint">逗号分隔，写入 dnsConfig.searches。</span>
                     </label>
-                    <label class="block">
-                      <span class="input-label">allowPrivilegeEscalation</span>
-                      <Select :model-value="createForm.allowPrivilegeEscalation" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateScalarField('allowPrivilegeEscalation', $event)" />
-                    </label>
-                    <label class="block">
-                      <span class="input-label">readOnlyRootFilesystem</span>
-                      <Select :model-value="createForm.readOnlyRootFilesystem" :options="[{ label: '默认', value: '' }, { label: '开启', value: 'true' }, { label: '关闭', value: 'false' }]" @update:model-value="updateScalarField('readOnlyRootFilesystem', $event)" />
-                    </label>
+                  </div>
+                  <div class="space-y-2">
+                    <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                      <span class="input-label">DNS 选项 options</span>
+                      <span class="text-xs text-gray-400 dark:text-dark-500">例如 ndots=5，写入 dnsConfig.options。</span>
+                    </div>
+                    <div v-for="option in createForm.dnsOptions" :key="option.id" class="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_auto]">
+                      <input v-model="option.key" class="input" placeholder="选项名称，例如 ndots" @focus="markFormSource" />
+                      <input v-model="option.value" class="input" placeholder="选项值，例如 5" @focus="markFormSource" />
+                      <button class="btn btn-secondary btn-sm" type="button" @click="removePair('dnsOptions', option.id)">
+                        <Icon name="trash" size="sm" />
+                      </button>
+                    </div>
+                    <button class="btn btn-danger btn-sm" type="button" @click="addPair('dnsOptions')">
+                      <Icon name="plus" size="sm" />
+                      添加 DNS 选项
+                    </button>
                   </div>
                 </div>
               </section>
@@ -3445,8 +3872,8 @@ onMounted(() => {
                 <div class="mb-4 space-y-3">
                   <button type="button" class="flex w-full items-start justify-between gap-3 text-left" @click="toggleSection('pod-storage')">
                     <span class="min-w-0">
-                      <span class="block text-sm font-semibold text-gray-900 dark:text-white">Pod 存储</span>
-                      <span class="block text-xs leading-5 text-gray-500 dark:text-dark-400">Pod volumes 支持 ConfigMap、Secret、PVC 和 emptyDir；容器挂载在普通容器 / Init 容器内引用这些卷。</span>
+                      <span class="block text-sm font-semibold text-gray-900 dark:text-white">Pod 存储卷</span>
+                      <span class="block text-xs leading-5 text-gray-500 dark:text-dark-400">只定义 Pod 模板 volumes；挂载路径在普通容器 / Init 容器的“挂载”页签中配置。</span>
                     </span>
                     <Icon :name="isSectionCollapsed('pod-storage') ? 'chevronDown' : 'chevronUp'" size="sm" class="mt-1 shrink-0 text-gray-400" />
                   </button>
@@ -3466,175 +3893,252 @@ onMounted(() => {
 
                 <div v-if="!isSectionCollapsed('pod-storage')" class="space-y-3">
                   <div class="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:bg-dark-900/40 dark:text-dark-400">
-                    {{ mountPanels.find((panel) => panel.id === activeMountPanel)?.help }}。未添加条目时不会写入 volumes / volumeMounts；需要新资源时可在当前弹窗叠加创建并自动选中。
+                    {{ mountPanels.find((panel) => panel.id === activeMountPanel)?.help }}。未添加条目时不会写入 volumes；同一个 volume 可被多个普通容器或 Init 容器分别挂载到不同路径。
                   </div>
 
-                  <div v-if="mountListByType(activeMountPanel).length" class="space-y-3">
-                    <div v-for="mount in mountListByType(activeMountPanel)" :key="mount.id" class="rounded-xl border border-gray-100 p-3 dark:border-dark-700">
+                  <div v-if="podVolumeListByType(activeMountPanel).length" class="space-y-3">
+                    <div v-for="volume in podVolumeListByType(activeMountPanel)" :key="volume.id" class="rounded-xl border border-gray-100 p-3 dark:border-dark-700">
                       <div class="grid min-w-0 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,0.9fr)_minmax(0,1fr)_minmax(0,1fr)]">
                         <label class="block">
                           <span class="input-label">Volume 名称</span>
-                          <input v-model="mount.name" class="input" placeholder="app-data" @focus="markFormSource" />
+                          <input v-model="volume.name" class="input" placeholder="app-data" @focus="markFormSource" />
                         </label>
-                        <div v-if="mount.type !== 'emptyDir'" class="block space-y-2">
-                          <span class="input-label">{{ mountSourceLabel(mount.type) }}</span>
+                        <div v-if="volume.type !== 'emptyDir'" class="block space-y-2">
+                          <span class="input-label">{{ mountSourceLabel(volume.type) }}</span>
                           <Select
-                            :model-value="sourceOptions(mount.type).some((option) => option.value === mount.sourceName) ? mount.sourceName : null"
-                            :options="sourceOptions(mount.type)"
-                            :placeholder="mount.sourceName || '请选择已有资源'"
+                            :model-value="sourceOptions(volume.type).some((option) => option.value === volume.sourceName) ? volume.sourceName : null"
+                            :options="sourceOptions(volume.type)"
+                            :placeholder="volume.sourceName || '请选择已有资源'"
                             searchable
-                            @update:model-value="onMountSourceSelect(mount, $event)"
+                            @update:model-value="onPodVolumeSourceSelect(volume, $event)"
                           />
                         </div>
-                        <label class="block">
-                          <span class="input-label">挂载路径</span>
-                          <input v-model="mount.mountPath" class="input" :placeholder="mountDefaultPath(mount.type)" @focus="markFormSource" />
-                        </label>
-                        <label class="block">
-                          <span class="input-label">SubPath</span>
-                          <input v-model="mount.subPath" class="input" placeholder="可选" @focus="markFormSource" />
-                        </label>
-                        <label class="flex min-h-[42px] items-center gap-2 rounded-xl border border-gray-200 px-4 py-2.5 text-sm text-gray-700 dark:border-dark-600 dark:text-dark-300">
-                          <input v-model="mount.readOnly" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500" @focus="markFormSource" />
-                          只读挂载
-                        </label>
+                        <div v-else class="rounded-xl border border-gray-100 px-4 py-2.5 text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
+                          emptyDir 不需要选择外部资源。
+                        </div>
+                        <div class="rounded-xl border border-gray-100 px-4 py-2.5 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:text-dark-400">
+                          <span class="font-semibold text-gray-700 dark:text-dark-200">使用情况：</span>
+                          <template v-if="podVolumeUsage(volume).length">
+                            <span v-for="usage in podVolumeUsage(volume)" :key="usage.id" class="mr-2 inline-flex rounded-lg bg-gray-100 px-2 py-1 dark:bg-dark-800">
+                              {{ usage.label }} -> {{ usage.path }}
+                            </span>
+                          </template>
+                          <span v-else>尚未挂载到容器。</span>
+                        </div>
                         <div class="flex items-end gap-2">
-                          <button class="btn btn-secondary btn-sm w-full" type="button" @click="removeVolumeMount(mount.id)">
+                          <button class="btn btn-secondary btn-sm w-full" type="button" @click="removePodVolume(volume.id)">
                             <Icon name="trash" size="sm" />
                             移除
-                          </button>
-                          <button v-if="mount.type !== 'emptyDir'" class="btn btn-secondary btn-sm w-full" type="button" @click="openRelatedConfigResource(mount.type, mount.id)">
-                            <Icon name="plus" size="sm" />
-                            新建并选中
                           </button>
                         </div>
                       </div>
                     </div>
                   </div>
                   <div v-else class="rounded-xl border border-gray-100 px-4 py-6 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
-                    当前分类还没有挂载项。
+                    当前分类还没有 Pod 存储卷。
                   </div>
 
-                  <button class="btn btn-secondary btn-sm" type="button" @click="addVolumeMount()">
+                  <button class="btn btn-danger btn-sm" type="button" @click="addPodVolume()">
                     <Icon name="plus" size="sm" />
-                    添加 {{ mountPanels.find((panel) => panel.id === activeMountPanel)?.label }} 挂载
+                    添加 {{ mountPanels.find((panel) => panel.id === activeMountPanel)?.label }} 卷
                   </button>
-                  <button v-if="activeMountPanel !== 'emptyDir'" class="btn btn-secondary btn-sm" type="button" @click="openRelatedConfigResource(activeMountPanel)">
+                  <button v-if="activeMountPanel !== 'emptyDir'" class="btn btn-danger btn-sm" type="button" @click="openRelatedConfigResource(activeMountPanel, undefined, 'pod-volume')">
                     <Icon name="plus" size="sm" />
-                    创建 {{ mountCreateLabel(activeMountPanel) }}
+                    新建 {{ mountCreateLabel(activeMountPanel) }} 并选中
                   </button>
                 </div>
               </section>
 
               <section v-if="createDefinition.type === 'deployments'" class="rounded-xl border border-gray-100 p-4 dark:border-dark-700">
                 <div class="mb-4 space-y-3">
-                  <button type="button" class="flex w-full items-start justify-between gap-3 text-left" @click="toggleSection('scheduling')">
+                  <button type="button" class="flex w-full items-start justify-between gap-3 text-left" @click="toggleSection('pod-scheduling')">
                     <span class="min-w-0">
-                      <span class="block text-sm font-semibold text-gray-900 dark:text-white">Pod 调度策略</span>
-                      <span class="block text-xs leading-5 text-gray-500 dark:text-dark-400">调度策略作用于整个 Pod，按节点调度、Pod 调度和容忍分组。</span>
+                      <span class="block text-sm font-semibold text-gray-900 dark:text-white">Pod 调度</span>
+                      <span class="block text-xs leading-5 text-gray-500 dark:text-dark-400">按 Pod 亲和与反亲和控制当前 Pod 与其他 Pod 在节点、可用区等拓扑域内的分布关系。</span>
                     </span>
-                    <Icon :name="isSectionCollapsed('scheduling') ? 'chevronDown' : 'chevronUp'" size="sm" class="mt-1 shrink-0 text-gray-400" />
+                    <Icon :name="isSectionCollapsed('pod-scheduling') ? 'chevronDown' : 'chevronUp'" size="sm" class="mt-1 shrink-0 text-gray-400" />
                   </button>
-                  <div v-if="!isSectionCollapsed('scheduling')" class="inline-flex w-full flex-wrap rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-dark-700 dark:bg-dark-900 lg:w-fit">
+                  <div v-if="!isSectionCollapsed('pod-scheduling')" class="inline-flex w-full flex-wrap rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-dark-700 dark:bg-dark-900 lg:w-fit">
                     <button
-                      v-for="panel in schedulePanels"
+                      v-for="panel in podSchedulePanels"
                       :key="panel.id"
                       type="button"
                       class="flex-1 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-semibold transition-all lg:flex-none"
-                      :class="segmentButtonClass(activeSchedulePanel === panel.id)"
-                      @click="setSchedulePanel(panel.id)"
+                      :class="segmentButtonClass(activePodSchedulePanel === panel.id)"
+                      @click="setPodSchedulePanel(panel.id)"
                     >
                       {{ panel.label }}
                     </button>
                   </div>
                 </div>
 
-                <div v-if="!isSectionCollapsed('scheduling')" class="space-y-3">
+                <div v-if="!isSectionCollapsed('pod-scheduling')" class="space-y-3">
                   <div class="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:bg-dark-900/40 dark:text-dark-400">
-                    {{ schedulePanels.find((panel) => panel.id === activeSchedulePanel)?.help }}
+                    {{ podSchedulePanels.find((panel) => panel.id === activePodSchedulePanel)?.help }} 当前表单生成 requiredDuringSchedulingIgnoredDuringExecution 规则。
                   </div>
 
-                  <div v-if="activeSchedulePanel === 'node'" class="space-y-4">
-                    <div class="space-y-3">
-                      <p class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-dark-500">nodeSelector</p>
-                    <div v-for="pair in createForm.nodeSelector" :key="pair.id" class="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)_auto]">
-                      <input v-model="pair.key" class="input" placeholder="node label key，例如 topology.kubernetes.io/zone" @focus="markFormSource" />
-                      <input v-model="pair.value" class="input" placeholder="value" @focus="markFormSource" />
-                      <button class="btn btn-secondary btn-sm" type="button" @click="removePair('nodeSelector', pair.id)">
-                        <Icon name="trash" size="sm" />
-                      </button>
+                  <div v-if="activePodSchedulePanel === 'affinity'" class="space-y-3">
+                    <div class="grid min-w-0 gap-2 rounded-xl bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-500 dark:bg-dark-900/50 dark:text-dark-400 sm:grid-cols-2">
+                      <span>拓扑域键</span>
+                      <span>目标 Pod 标签键</span>
+                      <span>匹配方式</span>
+                      <span>标签值</span>
                     </div>
-                    <button class="btn btn-secondary btn-sm" type="button" @click="addPair('nodeSelector')">
+                    <div v-for="item in affinityList('podAffinity')" :key="item.id" class="space-y-2 rounded-xl border border-gray-100 p-2 dark:border-dark-700">
+                      <div class="grid min-w-0 gap-2 sm:grid-cols-2">
+                        <input v-model="item.topologyKey" class="input" placeholder="例如 kubernetes.io/hostname" @focus="markFormSource" />
+                        <input v-model="item.labelKey" class="input" placeholder="例如 app.kubernetes.io/name" @focus="markFormSource" />
+                        <Select v-model="item.operator" :options="[{ label: '属于 In', value: 'In' }, { label: '不属于 NotIn', value: 'NotIn' }, { label: '存在 Exists', value: 'Exists' }, { label: '不存在 DoesNotExist', value: 'DoesNotExist' }]" />
+                        <input v-model="item.values" class="input" placeholder="多个值用逗号分隔" :disabled="['Exists', 'DoesNotExist'].includes(item.operator)" @focus="markFormSource" />
+                      </div>
+                      <div class="flex justify-end">
+                        <button class="btn btn-secondary btn-sm" type="button" @click="removePodAffinity('podAffinity', item.id)">
+                          <Icon name="trash" size="sm" />
+                        </button>
+                      </div>
+                    </div>
+                    <button class="btn btn-danger btn-sm w-fit" type="button" @click="addPodAffinity('podAffinity')">
                       <Icon name="plus" size="sm" />
-                      添加 nodeSelector
+                      添加 Pod 亲和规则
                     </button>
-                    </div>
-                    <div class="space-y-3">
-                      <p class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-dark-500">节点亲和</p>
-                    <div v-for="item in createForm.nodeAffinity" :key="item.id" class="grid min-w-0 gap-2 lg:grid-cols-[minmax(240px,1.6fr)_140px_minmax(180px,1fr)_auto]">
-                      <input v-model="item.key" class="input" placeholder="topology.kubernetes.io/zone" @focus="markFormSource" />
-                      <Select v-model="item.operator" :options="[{ label: 'In', value: 'In' }, { label: 'NotIn', value: 'NotIn' }, { label: 'Exists', value: 'Exists' }, { label: 'DoesNotExist', value: 'DoesNotExist' }]" />
-                      <input v-model="item.values" class="input" placeholder="value1, value2" :disabled="['Exists', 'DoesNotExist'].includes(item.operator)" @focus="markFormSource" />
-                      <button class="btn btn-secondary btn-sm" type="button" @click="removeNodeAffinity(item.id)">
-                        <Icon name="trash" size="sm" />
-                      </button>
-                    </div>
-                    <button class="btn btn-secondary btn-sm" type="button" @click="addNodeAffinity">
-                      <Icon name="plus" size="sm" />
-                      添加节点亲和
-                    </button>
-                    </div>
-                  </div>
-
-                  <div v-else-if="activeSchedulePanel === 'pod'" class="space-y-4">
-                    <div class="space-y-3">
-                      <p class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-dark-500">Pod 亲和</p>
-                    <div v-for="item in affinityList('podAffinity')" :key="item.id" class="grid min-w-0 gap-2 lg:grid-cols-[minmax(220px,1.2fr)_minmax(240px,1.4fr)_140px_minmax(180px,1fr)_auto]">
-                      <input v-model="item.topologyKey" class="input" placeholder="kubernetes.io/hostname" @focus="markFormSource" />
-                      <input v-model="item.labelKey" class="input" placeholder="app.kubernetes.io/name" @focus="markFormSource" />
-                      <Select v-model="item.operator" :options="[{ label: 'In', value: 'In' }, { label: 'NotIn', value: 'NotIn' }, { label: 'Exists', value: 'Exists' }, { label: 'DoesNotExist', value: 'DoesNotExist' }]" />
-                      <input v-model="item.values" class="input" placeholder="value1, value2" :disabled="['Exists', 'DoesNotExist'].includes(item.operator)" @focus="markFormSource" />
-                      <button class="btn btn-secondary btn-sm" type="button" @click="removePodAffinity('podAffinity', item.id)">
-                        <Icon name="trash" size="sm" />
-                      </button>
-                    </div>
-                    <button class="btn btn-secondary btn-sm" type="button" @click="addPodAffinity('podAffinity')">
-                      <Icon name="plus" size="sm" />
-                      添加 Pod 亲和
-                    </button>
-                    </div>
-                    <div class="space-y-3">
-                      <p class="text-xs font-semibold uppercase tracking-wide text-gray-400 dark:text-dark-500">Pod 反亲和</p>
-                    <div v-for="item in affinityList('podAntiAffinity')" :key="item.id" class="grid min-w-0 gap-2 lg:grid-cols-[minmax(220px,1.2fr)_minmax(240px,1.4fr)_140px_minmax(180px,1fr)_auto]">
-                      <input v-model="item.topologyKey" class="input" placeholder="kubernetes.io/hostname" @focus="markFormSource" />
-                      <input v-model="item.labelKey" class="input" placeholder="app.kubernetes.io/name" @focus="markFormSource" />
-                      <Select v-model="item.operator" :options="[{ label: 'In', value: 'In' }, { label: 'NotIn', value: 'NotIn' }, { label: 'Exists', value: 'Exists' }, { label: 'DoesNotExist', value: 'DoesNotExist' }]" />
-                      <input v-model="item.values" class="input" placeholder="value1, value2" :disabled="['Exists', 'DoesNotExist'].includes(item.operator)" @focus="markFormSource" />
-                      <button class="btn btn-secondary btn-sm" type="button" @click="removePodAffinity('podAntiAffinity', item.id)">
-                        <Icon name="trash" size="sm" />
-                      </button>
-                    </div>
-                    <button class="btn btn-secondary btn-sm" type="button" @click="addPodAffinity('podAntiAffinity')">
-                      <Icon name="plus" size="sm" />
-                      添加 Pod 反亲和
-                    </button>
-                    </div>
                   </div>
 
                   <div v-else class="space-y-3">
-                    <div v-for="item in createForm.tolerations" :key="item.id" class="grid min-w-0 gap-2 lg:grid-cols-[minmax(240px,1.5fr)_120px_minmax(180px,1fr)_150px_130px_auto]">
-                      <input v-model="item.key" class="input" placeholder="node.kubernetes.io/not-ready" @focus="markFormSource" />
-                      <Select v-model="item.operator" :options="[{ label: 'Equal', value: 'Equal' }, { label: 'Exists', value: 'Exists' }]" />
-                      <input v-model="item.value" class="input" placeholder="value" :disabled="item.operator === 'Exists'" @focus="markFormSource" />
-                      <Select v-model="item.effect" :options="[{ label: '不限制', value: '' }, { label: 'NoSchedule', value: 'NoSchedule' }, { label: 'PreferNoSchedule', value: 'PreferNoSchedule' }, { label: 'NoExecute', value: 'NoExecute' }]" />
-                      <input v-model.number="item.tolerationSeconds" class="input" min="0" type="number" placeholder="seconds" :disabled="item.effect !== 'NoExecute'" @focus="markFormSource" />
-                      <button class="btn btn-secondary btn-sm" type="button" @click="removeToleration(item.id)">
-                        <Icon name="trash" size="sm" />
-                      </button>
+                    <div class="grid min-w-0 gap-2 rounded-xl bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-500 dark:bg-dark-900/50 dark:text-dark-400 sm:grid-cols-2">
+                      <span>拓扑域键</span>
+                      <span>避开的 Pod 标签键</span>
+                      <span>匹配方式</span>
+                      <span>标签值</span>
                     </div>
-                    <button class="btn btn-secondary btn-sm" type="button" @click="addToleration">
+                    <div v-for="item in affinityList('podAntiAffinity')" :key="item.id" class="space-y-2 rounded-xl border border-gray-100 p-2 dark:border-dark-700">
+                      <div class="grid min-w-0 gap-2 sm:grid-cols-2">
+                        <input v-model="item.topologyKey" class="input" placeholder="例如 kubernetes.io/hostname" @focus="markFormSource" />
+                        <input v-model="item.labelKey" class="input" placeholder="例如 app.kubernetes.io/name" @focus="markFormSource" />
+                        <Select v-model="item.operator" :options="[{ label: '属于 In', value: 'In' }, { label: '不属于 NotIn', value: 'NotIn' }, { label: '存在 Exists', value: 'Exists' }, { label: '不存在 DoesNotExist', value: 'DoesNotExist' }]" />
+                        <input v-model="item.values" class="input" placeholder="多个值用逗号分隔" :disabled="['Exists', 'DoesNotExist'].includes(item.operator)" @focus="markFormSource" />
+                      </div>
+                      <div class="flex justify-end">
+                        <button class="btn btn-secondary btn-sm" type="button" @click="removePodAffinity('podAntiAffinity', item.id)">
+                          <Icon name="trash" size="sm" />
+                        </button>
+                      </div>
+                    </div>
+                    <button class="btn btn-danger btn-sm w-fit" type="button" @click="addPodAffinity('podAntiAffinity')">
                       <Icon name="plus" size="sm" />
-                      添加容忍
+                      添加 Pod 反亲和规则
+                    </button>
+                  </div>
+                </div>
+              </section>
+
+              <section v-if="createDefinition.type === 'deployments'" class="rounded-xl border border-gray-100 p-4 dark:border-dark-700">
+                <div class="mb-4 space-y-3">
+                  <button type="button" class="flex w-full items-start justify-between gap-3 text-left" @click="toggleSection('node-scheduling')">
+                    <span class="min-w-0">
+                      <span class="block text-sm font-semibold text-gray-900 dark:text-white">节点调度</span>
+                      <span class="block text-xs leading-5 text-gray-500 dark:text-dark-400">按节点标签选择、节点亲和和污点容忍控制 Pod 可调度到哪些 Node。</span>
+                    </span>
+                    <Icon :name="isSectionCollapsed('node-scheduling') ? 'chevronDown' : 'chevronUp'" size="sm" class="mt-1 shrink-0 text-gray-400" />
+                  </button>
+                  <div v-if="!isSectionCollapsed('node-scheduling')" class="inline-flex w-full flex-wrap rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-dark-700 dark:bg-dark-900 lg:w-fit">
+                    <button
+                      v-for="panel in nodeSchedulePanels"
+                      :key="panel.id"
+                      type="button"
+                      class="flex-1 whitespace-nowrap rounded-lg px-3 py-2 text-sm font-semibold transition-all lg:flex-none"
+                      :class="segmentButtonClass(activeNodeSchedulePanel === panel.id)"
+                      @click="setNodeSchedulePanel(panel.id)"
+                    >
+                      {{ panel.label }}
+                    </button>
+                  </div>
+                </div>
+
+                <div v-if="!isSectionCollapsed('node-scheduling')" class="space-y-3">
+                  <div class="rounded-xl border border-dashed border-gray-200 bg-gray-50 px-4 py-3 text-xs leading-5 text-gray-500 dark:border-dark-700 dark:bg-dark-900/40 dark:text-dark-400">
+                    {{ nodeSchedulePanels.find((panel) => panel.id === activeNodeSchedulePanel)?.help }}
+                  </div>
+
+                  <div v-if="activeNodeSchedulePanel === 'selector'" class="space-y-3">
+                    <div class="grid min-w-0 gap-2 rounded-xl bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-500 dark:bg-dark-900/50 dark:text-dark-400 sm:grid-cols-2">
+                      <span>节点标签键</span>
+                      <span>节点标签值</span>
+                    </div>
+                    <div v-for="pair in createForm.nodeSelector" :key="pair.id" class="space-y-2 rounded-xl border border-gray-100 p-2 dark:border-dark-700">
+                      <div class="grid min-w-0 gap-2 sm:grid-cols-2">
+                        <input v-model="pair.key" class="input" placeholder="例如 topology.kubernetes.io/zone" @focus="markFormSource" />
+                        <input v-model="pair.value" class="input" placeholder="例如 cn-hangzhou-a" @focus="markFormSource" />
+                      </div>
+                      <div class="flex justify-end">
+                        <button class="btn btn-secondary btn-sm" type="button" @click="removePair('nodeSelector', pair.id)">
+                          <Icon name="trash" size="sm" />
+                        </button>
+                      </div>
+                    </div>
+                    <div v-if="!createForm.nodeSelector.length" class="rounded-xl border border-gray-100 px-4 py-5 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
+                      未配置节点标签选择；为空时不写入 nodeSelector。
+                    </div>
+                    <button class="btn btn-danger btn-sm w-fit" type="button" @click="addPair('nodeSelector')">
+                      <Icon name="plus" size="sm" />
+                      添加节点标签条件
+                    </button>
+                  </div>
+
+                  <div v-else-if="activeNodeSchedulePanel === 'affinity'" class="space-y-3">
+                    <div class="grid min-w-0 gap-2 rounded-xl bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-500 dark:bg-dark-900/50 dark:text-dark-400 sm:grid-cols-2">
+                      <span>节点标签键</span>
+                      <span>匹配方式</span>
+                      <span>标签值</span>
+                    </div>
+                    <div v-for="item in createForm.nodeAffinity" :key="item.id" class="space-y-2 rounded-xl border border-gray-100 p-2 dark:border-dark-700">
+                      <div class="grid min-w-0 gap-2 sm:grid-cols-2">
+                        <input v-model="item.key" class="input" placeholder="例如 kubernetes.io/os" @focus="markFormSource" />
+                        <Select v-model="item.operator" :options="[{ label: '属于 In', value: 'In' }, { label: '不属于 NotIn', value: 'NotIn' }, { label: '存在 Exists', value: 'Exists' }, { label: '不存在 DoesNotExist', value: 'DoesNotExist' }]" />
+                        <input v-model="item.values" class="input" placeholder="多个值用逗号分隔，例如 linux, windows" :disabled="['Exists', 'DoesNotExist'].includes(item.operator)" @focus="markFormSource" />
+                      </div>
+                      <div class="flex justify-end">
+                        <button class="btn btn-secondary btn-sm" type="button" @click="removeNodeAffinity(item.id)">
+                          <Icon name="trash" size="sm" />
+                        </button>
+                      </div>
+                    </div>
+                    <div v-if="!createForm.nodeAffinity.length" class="rounded-xl border border-gray-100 px-4 py-5 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
+                      未配置节点亲和；为空时不写入 nodeAffinity。
+                    </div>
+                    <button class="btn btn-danger btn-sm w-fit" type="button" @click="addNodeAffinity">
+                      <Icon name="plus" size="sm" />
+                      添加节点亲和条件
+                    </button>
+                  </div>
+
+                  <div v-else class="space-y-3">
+                    <div class="grid min-w-0 gap-2 rounded-xl bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-500 dark:bg-dark-900/50 dark:text-dark-400 sm:grid-cols-2">
+                      <span>污点键</span>
+                      <span>匹配方式</span>
+                      <span>污点值</span>
+                      <span>污点效果</span>
+                      <span>容忍秒数</span>
+                    </div>
+                    <div v-for="item in createForm.tolerations" :key="item.id" class="space-y-2 rounded-xl border border-gray-100 p-2 dark:border-dark-700">
+                      <div class="grid min-w-0 gap-2 sm:grid-cols-2">
+                        <input v-model="item.key" class="input" placeholder="例如 node.kubernetes.io/not-ready" @focus="markFormSource" />
+                        <Select v-model="item.operator" :options="[{ label: '等于 Equal', value: 'Equal' }, { label: '存在 Exists', value: 'Exists' }]" />
+                        <input v-model="item.value" class="input" placeholder="污点值" :disabled="item.operator === 'Exists'" @focus="markFormSource" />
+                        <Select v-model="item.effect" :options="[{ label: '不限制', value: '' }, { label: 'NoSchedule', value: 'NoSchedule' }, { label: 'PreferNoSchedule', value: 'PreferNoSchedule' }, { label: 'NoExecute', value: 'NoExecute' }]" />
+                        <input v-model.number="item.tolerationSeconds" class="input" min="0" type="number" placeholder="秒" :disabled="item.effect !== 'NoExecute'" @focus="markFormSource" />
+                      </div>
+                      <div class="flex justify-end">
+                        <button class="btn btn-secondary btn-sm" type="button" @click="removeToleration(item.id)">
+                          <Icon name="trash" size="sm" />
+                        </button>
+                      </div>
+                    </div>
+                    <div v-if="!createForm.tolerations.length" class="rounded-xl border border-gray-100 px-4 py-5 text-center text-sm text-gray-500 dark:border-dark-700 dark:text-dark-400">
+                      未配置污点容忍；为空时不写入 tolerations。
+                    </div>
+                    <button class="btn btn-danger btn-sm w-fit" type="button" @click="addToleration">
+                      <Icon name="plus" size="sm" />
+                      添加污点容忍
                     </button>
                   </div>
                 </div>
@@ -3654,41 +4158,33 @@ onMounted(() => {
                     @update:model-value="applyYamlTemplate"
                   />
                 </div>
-                <p class="rounded-lg bg-gray-50 px-3 py-2 text-xs leading-5 text-gray-500 dark:bg-dark-900/50 dark:text-dark-400">
-                  {{ yamlTemplates.find((template) => template.id === activeYamlTemplate)?.description }}
-                </p>
                 <p class="text-xs leading-5 text-gray-500 dark:text-dark-400">
-                  模板用于快速填充起始字段，不会锁定名称和镜像；如果你已经手动改过镜像，再切模板会保留当前镜像。
+                  模板用于快速填充最小起始字段，不会锁定名称；切换模板会同步替换对应镜像。
                 </p>
               </div>
 
-              <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-                <div>
-                  <span class="input-label">YAML</span>
-                  <span class="text-xs" :class="yamlParseError ? 'text-red-500' : 'text-gray-400 dark:text-dark-500'">
-                    {{ yamlParseError || (createMode === 'form' ? '随表单实时生成，可切到 YAML 直接编辑' : 'YAML 变更会尝试回填表单') }}
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="input-label mb-0">YAML</span>
+                  <span class="rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-xs font-medium text-blue-700 dark:border-blue-900/50 dark:bg-blue-950/30 dark:text-blue-300">
+                    当前：{{ createMode === 'form' ? '表单模式' : 'YAML 模式' }}
                   </span>
-                </div>
-                <div class="flex items-center gap-2">
-                  <span class="text-xs text-gray-500 dark:text-dark-400">字号</span>
-                  <span
-                    class="rounded-full border px-3 py-1 text-xs font-medium"
-                    :class="validationStatusClass(yamlSyntaxStatus().status)"
-                  >
+                  <span class="rounded-full border px-3 py-1 text-xs font-medium" :class="validationStatusClass(yamlSyntaxStatus().status)">
                     {{ yamlSyntaxStatus().text }}
                   </span>
-                  <div class="inline-flex rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-dark-700 dark:bg-dark-900">
-                    <button
-                      v-for="size in [12, 13, 14, 16]"
-                      :key="size"
-                      type="button"
-                      class="rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-all"
-                      :class="segmentButtonClass(yamlFontSize === size)"
-                      @click="setYamlFontSize(size)"
-                    >
-                      {{ size }}
-                    </button>
-                  </div>
+                </div>
+                <div class="inline-flex w-fit items-center gap-1 rounded-xl border border-gray-200 bg-gray-100 p-1 dark:border-dark-700 dark:bg-dark-900 sm:ml-auto">
+                  <span class="px-1.5 text-xs font-medium text-gray-500 dark:text-dark-400">字号</span>
+                  <button
+                    v-for="size in [12, 13, 14, 16]"
+                    :key="size"
+                    type="button"
+                    class="rounded-lg px-2 py-1 text-xs font-semibold transition-all"
+                    :class="segmentButtonClass(yamlFontSize === size)"
+                    @click="yamlFontSize = size"
+                  >
+                    {{ size }}
+                  </button>
                 </div>
               </div>
               <div v-if="yamlValidationItems.some((item) => item.status === 'warning' || item.status === 'error')" class="flex flex-wrap gap-2">
@@ -3758,7 +4254,7 @@ onMounted(() => {
     >
       <form class="space-y-4" @submit.prevent="submitRelatedForm">
         <div class="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm leading-6 text-blue-700 dark:border-blue-900/40 dark:bg-blue-950/30 dark:text-blue-300">
-          在当前 Deployment 表单上叠加创建 {{ relatedDefinition.title }}；取消会回到原表单，创建成功后会自动选中到挂载配置。
+          在当前 Deployment 表单上叠加创建 {{ relatedDefinition.title }}；取消会回到原表单，创建成功后会自动选中到{{ relatedFillTargetText }}。
         </div>
 
         <div class="flex flex-col gap-3 rounded-xl border border-gray-200 p-3 dark:border-dark-700 sm:flex-row sm:items-center sm:justify-between">
@@ -3863,7 +4359,7 @@ onMounted(() => {
 
         <div class="flex justify-end gap-2">
           <button class="btn btn-secondary" type="button" @click="closeRelatedDialog">取消</button>
-          <button class="btn btn-primary" type="submit">创建并回填</button>
+          <button class="btn btn-primary" type="submit">创建并选中</button>
         </div>
       </form>
     </BaseDialog>
